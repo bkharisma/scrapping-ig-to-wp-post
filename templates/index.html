@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>IG Crawler Dashboard</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
+    <link href="/static/style.css" rel="stylesheet">
+</head>
+<body>
+
+<nav class="navbar navbar-dark bg-dark sticky-top">
+    <div class="container-fluid px-3">
+        <span class="navbar-brand">
+            <i class="bi bi-instagram"></i> IG Crawler Dashboard
+        </span>
+        <span class="text-light small" id="navAccount">
+            <i class="bi bi-info-circle"></i> Muat .env untuk info akun
+        </span>
+        <span class="ms-2 d-none" id="navWpBadge">
+            <span class="badge bg-success"><i class="bi bi-wordpress"></i> WP</span>
+        </span>
+    </div>
+</nav>
+
+<div class="container-fluid px-3 py-3">
+    <div class="row g-3">
+
+        <!-- LEFT PANEL -->
+        <div class="col-lg-3 col-xl-2">
+            <!-- Crawl Form -->
+            <div class="card shadow-sm mb-3">
+                <div class="card-header py-2">
+                    <i class="bi bi-search"></i> Crawl Instagram
+                </div>
+                <div class="card-body">
+                    <div class="mb-2">
+                        <label class="form-label small">Date From</label>
+                        <input type="date" class="form-control form-control-sm" id="dateFrom">
+                    </div>
+                    <div class="mb-2">
+                        <label class="form-label small">Date To</label>
+                        <input type="date" class="form-control form-control-sm" id="dateTo">
+                    </div>
+                    <div class="mb-2">
+                        <label class="form-label small">Jenis Media</label>
+                        <div class="d-flex flex-wrap gap-2">
+                            <div class="form-check">
+                                <input class="form-check-input" type="checkbox" id="typeImage" checked>
+                                <label class="form-check-label small">IMAGE</label>
+                            </div>
+                            <div class="form-check">
+                                <input class="form-check-input" type="checkbox" id="typeVideo" checked>
+                                <label class="form-check-label small">VIDEO</label>
+                            </div>
+                            <div class="form-check">
+                                <input class="form-check-input" type="checkbox" id="typeCarousel" checked>
+                                <label class="form-check-label small">CAROUSEL</label>
+                            </div>
+                        </div>
+                    </div>
+                    <button class="btn btn-primary w-100" id="btnCrawl" onclick="startCrawl()">
+                        <i class="bi bi-cloud-arrow-down"></i> Mulai Crawl
+                    </button>
+                    <div id="crawlProgress" class="mt-2 d-none">
+                        <div class="progress progress-thin mb-1">
+                            <div class="progress-bar progress-bar-striped progress-bar-animated" id="crawlBar" style="width:0%"></div>
+                        </div>
+                        <small class="text-muted" id="crawlMessage">Memulai...</small>
+                        <div id="wpProgress" class="mt-1 d-none">
+                            <div class="progress progress-thin mb-1">
+                                <div class="progress-bar bg-info progress-bar-striped progress-bar-animated" id="wpBar" style="width:0%"></div>
+                            </div>
+                            <small class="text-muted" id="wpMessage"></small>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Session History -->
+            <div class="card shadow-sm mb-3">
+                <div class="card-header py-2">
+                    <i class="bi bi-clock-history"></i> Riwayat Crawl
+                </div>
+                <div id="sessionList" class="list-group list-group-flush" style="max-height:400px;overflow-y:auto">
+                    <div class="text-center py-4 text-muted small">Memuat...</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- RIGHT PANEL -->
+        <div class="col-lg-9 col-xl-10">
+            <!-- Stats -->
+            <div class="card shadow-sm mb-3 d-none" id="statsCard">
+                <div class="card-body py-2" id="statsContent"></div>
+            </div>
+
+            <!-- Posts Table -->
+            <div class="card shadow-sm">
+                <div class="card-header py-2 d-flex justify-content-between align-items-center flex-wrap gap-2">
+                    <div>
+                        <span class="fw-bold" id="activeSessionLabel">Pilih sesi crawl</span>
+                        <span class="badge bg-secondary ms-1" id="postCount">0</span>
+                    </div>
+                    <div class="d-flex gap-2 align-items-center flex-wrap">
+                        <input type="text" class="form-control form-control-sm" placeholder="Cari caption..." id="searchInput" style="width:180px">
+                        <select class="form-select form-select-sm" id="sortSelect" style="width:130px">
+                            <option value="timestamp_desc">Terbaru</option>
+                            <option value="timestamp_asc">Terlama</option>
+                            <option value="likes_desc">Like &uarr;</option>
+                            <option value="likes_asc">Like &darr;</option>
+                            <option value="comments_desc">Komentar &uarr;</option>
+                            <option value="comments_asc">Komentar &darr;</option>
+                        </select>
+                        <button class="btn btn-sm btn-outline-success" onclick="downloadCSV()" title="Download CSV">
+                            <i class="bi bi-filetype-csv"></i>
+                        </button>
+                        <button class="btn btn-sm btn-outline-primary" onclick="downloadImages()" title="Download Images ZIP">
+                            <i class="bi bi-images"></i>
+                        </button>
+                        <button class="btn btn-sm btn-outline-secondary d-none" id="btnPostToWP" onclick="postSessionToWP()" title="Post ke WordPress">
+                            <i class="bi bi-wordpress"></i> WP
+                        </button>
+                    </div>
+                </div>
+                <div class="table-responsive">
+                    <table class="table table-hover mb-0" id="postsTable">
+                        <thead>
+                            <tr>
+                                <th style="width:50px">#</th>
+                                <th style="width:72px">Media</th>
+                                <th style="width:100px">Tanggal</th>
+                                <th>Caption</th>
+                                <th style="width:70px">Tipe</th>
+                                <th style="width:50px">&#9829;</th>
+                                <th style="width:50px">&#9993;</th>
+                            </tr>
+                        </thead>
+                        <tbody id="postsBody">
+                            <tr><td colspan="7" class="text-center py-5 text-muted">Pilih sesi di sebelah kiri</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+                <div class="card-footer py-2 d-flex justify-content-between align-items-center">
+                    <small class="text-muted" id="paginationInfo">0 hasil</small>
+                    <nav>
+                        <ul class="pagination pagination-sm mb-0" id="pagination"></ul>
+                    </nav>
+                </div>
+            </div>
+        </div>
+
+    </div>
+</div>
+
+<!-- Post Detail Modal -->
+<div class="modal fade" id="postModal" tabindex="-1" data-bs-backdrop="static">
+    <div class="modal-dialog modal-xl modal-dialog-centered modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header py-2">
+                <h6 class="modal-title" id="postModalLabel">Post Detail</h6>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body p-0">
+                <div class="row g-0">
+                    <div class="col-lg-7 position-relative" id="postModalMediaCol">
+                        <div class="modal-media-container" id="postModalMedia"></div>
+                        <button class="modal-nav-btn prev d-none" id="mediaPrev" onclick="navigateMedia(-1)">&#8249;</button>
+                        <button class="modal-nav-btn next d-none" id="mediaNext" onclick="navigateMedia(1)">&#8250;</button>
+                        <div id="mediaCounter" class="position-absolute bottom-0 start-50 translate-middle-x text-white small mb-2 px-2 rounded-pill" style="background:rgba(0,0,0,.5);display:none"></div>
+                    </div>
+                    <div class="col-lg-5 d-flex flex-column">
+                        <div class="p-3 overflow-auto" style="max-height:70vh">
+                            <div class="d-flex justify-content-between align-items-center mb-2">
+                                <span class="badge type-badge" id="modalType"></span>
+                                <a href="#" id="modalPermalink" target="_blank" class="small">
+                                    <i class="bi bi-box-arrow-up-right"></i> Buka di IG
+                                </a>
+                            </div>
+                            <div class="d-flex gap-3 mb-2 text-center">
+                                <div><small class="text-muted d-block">&#9829;</small><strong id="modalLikes">0</strong></div>
+                                <div><small class="text-muted d-block">&#9993;</small><strong id="modalComments">0</strong></div>
+                                <div><small class="text-muted d-block">Tanggal</small><strong id="modalDate">-</strong></div>
+                            </div>
+                            <hr class="my-2">
+                            <p class="small mb-0" id="modalCaption" style="white-space:pre-wrap"></p>
+                            <div class="mt-2" id="modalChildren"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>
