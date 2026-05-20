@@ -3,6 +3,7 @@ import logging
 import threading
 import io
 import zipfile
+import re
 from pathlib import Path
 from datetime import datetime
 
@@ -12,7 +13,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from config import ACCESS_TOKEN, IG_USER_ID, WP_ENABLED, WP_URL, WP_USER, WP_APP_PASS, WP_POST_STATUS
-from crawler import InstagramCrawler
+from scrapper import InstagramScrapper
 from downloader import download_media_organized
 from exporter import export_captions_csv
 
@@ -25,11 +26,12 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-CRAWLS_DIR = Path("data") / "crawls"
+DATA_DIR = Path("data")
+CRAWLS_DIR = DATA_DIR / "crawls"
 CRAWLS_DIR.mkdir(parents=True, exist_ok=True)
 
-crawl_progress: dict = {}
-crawl_lock = threading.Lock()
+scrap_progress: dict = {}
+scrap_lock = threading.Lock()
 
 
 def get_session_index() -> list[dict]:
@@ -94,13 +96,13 @@ def update_session_index(session_id: str, posts: list[dict],
     save_session_index(index)
 
 
-def crawl_task(date_from: str, date_to: str, media_types: list[str],
+def scrap_task(date_from: str, date_to: str, media_types: list[str],
                progress_key: str):
     session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     def update_prog(**kw):
-        with crawl_lock:
-            crawl_progress[progress_key].update(kw)
+        with scrap_lock:
+            scrap_progress[progress_key].update(kw)
 
     def download_cb(done, total, msg):
         pct = int(done / total * 100) if total else 0
@@ -108,20 +110,20 @@ def crawl_task(date_from: str, date_to: str, media_types: list[str],
                      download_pct=pct, message=f"Download media: {done}/{total} - {msg}")
 
     try:
-        with crawl_lock:
-            crawl_progress[progress_key] = {
+        with scrap_lock:
+            scrap_progress[progress_key] = {
                 "status": "running", "session_id": session_id,
                 "page": 0, "total_fetched": 0, "total_downloaded": 0,
-                "download_pct": 0, "message": "Memulai crawling...",
+                "download_pct": 0, "message": "Memulai scrapping...",
             }
 
         session_dir = CRAWLS_DIR / session_id
         session_dir.mkdir(parents=True)
 
-        crawler = InstagramCrawler()
+        scraper = InstagramScrapper()
 
         update_prog(message="Mengambil data dari Instagram...")
-        posts = crawler.fetch_all_media(date_from, date_to)
+        posts = scraper.fetch_all_media(date_from, date_to)
 
         update_prog(total_fetched=len(posts),
                      message=f"Ditemukan {len(posts)} post dalam periode")
@@ -189,8 +191,8 @@ def crawl_task(date_from: str, date_to: str, media_types: list[str],
 
     except Exception as e:
         logger.exception("Crawl gagal")
-        with crawl_lock:
-            crawl_progress[progress_key] = {
+        with scrap_lock:
+            scrap_progress[progress_key] = {
                 "status": "error", "session_id": session_id,
                 "message": f"Error: {str(e)}",
             }
@@ -201,8 +203,8 @@ def index():
     return render_template("index.html")
 
 
-@app.route("/api/crawl", methods=["POST"])
-def start_crawl():
+@app.route("/api/scrap", methods=["POST"])
+def start_scrap():
     data = request.get_json()
     date_from = data.get("date_from", "")
     date_to = data.get("date_to", "")
@@ -213,7 +215,7 @@ def start_crawl():
 
     progress_key = datetime.now().isoformat()
     thread = threading.Thread(
-        target=crawl_task, args=(date_from, date_to, media_types, progress_key),
+        target=scrap_task, args=(date_from, date_to, media_types, progress_key),
         daemon=True
     )
     thread.start()
@@ -221,13 +223,13 @@ def start_crawl():
     return jsonify({"progress_key": progress_key})
 
 
-@app.route("/api/crawl/status")
-def get_crawl_status():
+@app.route("/api/scrap/status")
+def get_scrap_status():
     progress_key = request.args.get("key", "")
-    with crawl_lock:
-        status = crawl_progress.get(
+    with scrap_lock:
+        status = scrap_progress.get(
             progress_key,
-            {"status": "idle", "message": "Tidak ada crawl aktif"}
+            {"status": "idle", "message": "Tidak ada scrap aktif"}
         )
     return jsonify(status)
 
@@ -422,12 +424,12 @@ def wp_post_task(session_id: str, post_ids: list[str], progress_key: str):
     from wordpress import WordPressClient
 
     def update_prog(**kw):
-        with crawl_lock:
-            crawl_progress[progress_key].update(kw)
+        with scrap_lock:
+            scrap_progress[progress_key].update(kw)
 
     try:
-        with crawl_lock:
-            crawl_progress[progress_key] = {
+        with scrap_lock:
+            scrap_progress[progress_key] = {
                 "status": "running", "session_id": session_id,
                 "wp_posted": 0, "wp_total": 0, "message": "Memulai upload ke WordPress...",
             }
@@ -461,11 +463,69 @@ def wp_post_task(session_id: str, post_ids: list[str], progress_key: str):
 
     except Exception as e:
         logger.exception("WP post task gagal")
-        with crawl_lock:
-            crawl_progress[progress_key] = {
+        with scrap_lock:
+            scrap_progress[progress_key] = {
                 "status": "error", "session_id": session_id,
                 "message": f"Error: {str(e)}",
             }
+
+
+@app.route("/api/config/token", methods=["POST"])
+def update_token():
+    data = request.get_json()
+    new_token = (data.get("access_token") or "").strip()
+    if not new_token:
+        return jsonify({"error": "Token tidak boleh kosong"}), 400
+
+    env_path = Path(".env")
+    if not env_path.exists():
+        return jsonify({"error": "File .env tidak ditemukan"}), 500
+
+    content = env_path.read_text(encoding="utf-8")
+    if re.search(r"^ACCESS_TOKEN=", content, re.MULTILINE):
+        content = re.sub(r"^ACCESS_TOKEN=.*", f"ACCESS_TOKEN={new_token}", content, flags=re.MULTILINE)
+    else:
+        content += f"\nACCESS_TOKEN={new_token}\n"
+    env_path.write_text(content, encoding="utf-8")
+
+    import config
+    config.ACCESS_TOKEN = new_token
+
+    import scrapper
+    scrapper.ACCESS_TOKEN = new_token
+
+    global ACCESS_TOKEN
+    ACCESS_TOKEN = new_token
+
+    return jsonify({"ok": True, "message": "Token berhasil diperbarui"})
+
+
+@app.route("/api/config/ig-test")
+def test_ig_token():
+    from scrapper import InstagramScrapper
+    try:
+        c = InstagramScrapper()
+        info = c.get_account_info()
+        return jsonify({
+            "ok": True,
+            "username": info.get("username", "?"),
+            "name": info.get("name", "?"),
+            "followers": info.get("followers_count", 0),
+            "message": f"Token valid! Akun: @{info.get('username', '?')}",
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
+
+
+@app.route("/api/config/account")
+def get_account_info():
+    from scrapper import InstagramScrapper
+    try:
+        c = InstagramScrapper()
+        info = c.get_account_info()
+        return jsonify({"ok": True, "account": info})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e), "account": None})
 
 
 @app.route("/api/sessions/<session_id>/post-to-wp", methods=["POST"])

@@ -13,7 +13,7 @@ async function loadSessions() {
         const el = document.getElementById('sessionList');
 
         if (!sessions.length) {
-            el.innerHTML = '<div class="text-center py-4 text-muted small">Belum ada sesi crawl</div>';
+            el.innerHTML = '<div class="text-center py-4 text-muted small">Belum ada sesi scrap</div>';
             return;
         }
 
@@ -87,7 +87,7 @@ async function loadPosts() {
 function renderPosts(posts) {
     const tbody = document.getElementById('postsBody');
     if (!posts.length) {
-        tbody.innerHTML = '<tr><td colspan="7" class="text-center py-5 text-muted">Tidak ada hasil</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="8" class="text-center py-5 text-muted">Tidak ada hasil</td></tr>';
         return;
     }
 
@@ -105,9 +105,10 @@ function renderPosts(posts) {
         const hasMedia = thumbSrc || p.media_type === 'VIDEO';
 
         return `
-        <tr onclick="openPostDetail('${p.id}')" style="cursor:pointer">
-            <td class="text-muted small">${offset + i + 1}</td>
-            <td>
+        <tr>
+            <td class="text-center"><input type="checkbox" class="post-checkbox" value="${p.id}" onchange="updateSelectedCount()"></td>
+            <td class="text-muted small" style="cursor:pointer" onclick="openPostDetail('${p.id}')">${offset + i + 1}</td>
+            <td style="cursor:pointer" onclick="openPostDetail('${p.id}')">
                 ${hasMedia ? `
                 <div class="media-thumb-video">
                     <img src="${thumbSrc}" class="media-thumb"
@@ -117,11 +118,11 @@ function renderPosts(posts) {
                     ${childrenCount > 0 ? `<span style="position:absolute;bottom:2px;right:2px;background:rgba(0,0,0,.6);color:#fff;font-size:10px;padding:1px 5px;border-radius:3px">${childrenCount}</span>` : ''}
                 </div>` : '<span class="text-muted small">-</span>'}
             </td>
-            <td class="small">${formatDate(p.timestamp)}</td>
-            <td><div class="caption-cell small">${escapeHtml((p.caption || '').substring(0, 150))}</div></td>
-            <td><span class="badge ${typeBadgeClass} type-badge">${p.media_type === 'CAROUSEL_ALBUM' ? 'ALBUM' : p.media_type}</span></td>
-            <td class="small text-center">${p.like_count || 0}</td>
-            <td class="small text-center">${p.comments_count || 0}</td>
+            <td class="small" style="cursor:pointer" onclick="openPostDetail('${p.id}')">${formatDate(p.timestamp)}</td>
+            <td style="cursor:pointer" onclick="openPostDetail('${p.id}')"><div class="caption-cell small">${escapeHtml((p.caption || '').substring(0, 150))}</div></td>
+            <td style="cursor:pointer" onclick="openPostDetail('${p.id}')"><span class="badge ${typeBadgeClass} type-badge">${p.media_type === 'CAROUSEL_ALBUM' ? 'ALBUM' : p.media_type}</span></td>
+            <td class="small text-center" style="cursor:pointer" onclick="openPostDetail('${p.id}')">${p.like_count || 0}</td>
+            <td class="small text-center" style="cursor:pointer" onclick="openPostDetail('${p.id}')">${p.comments_count || 0}</td>
         </tr>`;
     }).join('');
 }
@@ -206,12 +207,12 @@ async function loadStats(sessionId) {
     }
 }
 
-// --- Crawl ---
-async function startCrawl() {
-    const btn = document.getElementById('btnCrawl');
-    const prog = document.getElementById('crawlProgress');
-    const bar = document.getElementById('crawlBar');
-    const msg = document.getElementById('crawlMessage');
+async function startScrap() {
+    const bar = document.getElementById('scrapBar');
+    const msg = document.getElementById('scrapMessage');
+    const btn = document.getElementById('btnScrap');
+    const closeBtn = document.getElementById('btnScrapClose');
+    const modalEl = document.getElementById('scrapModal');
 
     const date_from = document.getElementById('dateFrom').value;
     const date_to = document.getElementById('dateTo').value;
@@ -220,20 +221,23 @@ async function startCrawl() {
     if (document.getElementById('typeVideo').checked) media_types.push('VIDEO');
     if (document.getElementById('typeCarousel').checked) media_types.push('CAROUSEL_ALBUM');
 
-    if (!media_types.length) {
-        alert('Pilih minimal satu jenis media.');
-        return;
-    }
+    // Reset modal
+    bar.style.width = '0%';
+    bar.className = 'progress-bar progress-bar-striped progress-bar-animated';
+    msg.textContent = 'Memulai...';
+    document.getElementById('wpProgress').classList.add('d-none');
+    closeBtn.disabled = true;
+
+    // Show modal
+    pendingSessionId = null;
+    const modal = new bootstrap.Modal(modalEl);
+    modal.show();
 
     btn.disabled = true;
-    btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Crawling...';
-    prog.classList.remove('d-none');
-    bar.style.width = '0%';
-    bar.classList.add('progress-bar-animated');
-    msg.textContent = 'Memulai...';
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Scrapping...';
 
     try {
-        const res = await fetch('/api/crawl', {
+        const res = await fetch('/api/scrap', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ date_from, date_to, media_types }),
@@ -243,30 +247,31 @@ async function startCrawl() {
         if (data.error) {
             msg.textContent = 'Error: ' + data.error;
             btn.disabled = false;
-            btn.innerHTML = '<i class="bi bi-cloud-arrow-down"></i> Mulai Crawl';
+            btn.innerHTML = '<i class="bi bi-cloud-arrow-down"></i> Mulai Scrap';
+            closeBtn.disabled = false;
             return;
         }
 
-        // Poll status
-        pollCrawlStatus(data.progress_key);
+        pollScrapStatus(data.progress_key);
     } catch (e) {
         msg.textContent = 'Error: ' + e.message;
         btn.disabled = false;
-        btn.innerHTML = '<i class="bi bi-cloud-arrow-down"></i> Mulai Crawl';
+        btn.innerHTML = '<i class="bi bi-cloud-arrow-down"></i> Mulai Scrap';
+        closeBtn.disabled = false;
     }
 }
 
-function pollCrawlStatus(key) {
-    const bar = document.getElementById('crawlBar');
-    const msg = document.getElementById('crawlMessage');
-    const btn = document.getElementById('btnCrawl');
+function pollScrapStatus(key) {
+    const bar = document.getElementById('scrapBar');
+    const msg = document.getElementById('scrapMessage');
+    const btn = document.getElementById('btnScrap');
     const wpProg = document.getElementById('wpProgress');
     const wpBar = document.getElementById('wpBar');
     const wpMsg = document.getElementById('wpMessage');
 
     const timer = setInterval(async () => {
         try {
-            const res = await fetch(`/api/crawl/status?key=${encodeURIComponent(key)}`);
+            const res = await fetch(`/api/scrap/status?key=${encodeURIComponent(key)}`);
             const status = await res.json();
 
             msg.textContent = status.message || '';
@@ -292,32 +297,44 @@ function pollCrawlStatus(key) {
                 clearInterval(timer);
                 bar.style.width = '100%';
                 bar.classList.remove('progress-bar-animated');
+                bar.classList.add('bg-success');
                 btn.disabled = false;
-                btn.innerHTML = '<i class="bi bi-cloud-arrow-down"></i> Mulai Crawl';
+                btn.innerHTML = '<i class="bi bi-cloud-arrow-down"></i> Mulai Scrap';
 
                 if (status.wp_total > 0) {
                     wpBar.style.width = '100%';
                     wpBar.classList.remove('progress-bar-animated');
                 }
 
+                document.getElementById('btnScrapClose').disabled = false;
+
                 if (status.session_id) {
-                    setTimeout(() => {
-                        document.getElementById('crawlProgress').classList.add('d-none');
-                        wpProg.classList.add('d-none');
-                        switchSession(status.session_id);
-                    }, 2000);
+                    pendingSessionId = status.session_id;
                 }
             } else if (status.status === 'error') {
                 clearInterval(timer);
                 bar.classList.remove('progress-bar-animated');
                 bar.classList.add('bg-danger');
                 btn.disabled = false;
-                btn.innerHTML = '<i class="bi bi-cloud-arrow-down"></i> Mulai Crawl';
+                btn.innerHTML = '<i class="bi bi-cloud-arrow-down"></i> Mulai Scrap';
+                document.getElementById('btnScrapClose').disabled = false;
             }
         } catch (e) {
             console.error('Poll error:', e);
         }
     }, 1000);
+}
+
+let pendingSessionId = null;
+
+function closeScrapModal() {
+    const modal = bootstrap.Modal.getInstance(document.getElementById('scrapModal'));
+    if (modal) modal.hide();
+    if (pendingSessionId) {
+        switchSession(pendingSessionId);
+        loadSessions();
+        pendingSessionId = null;
+    }
 }
 
 // --- Post Detail Modal ---
@@ -482,59 +499,140 @@ async function checkWpStatus() {
     }
 }
 
-async function postSessionToWP() {
+// --- WP Selection ---
+function toggleSelectAll(checkbox) {
+    document.querySelectorAll('.post-checkbox').forEach(cb => cb.checked = checkbox.checked);
+    updateSelectedCount();
+}
+
+function updateSelectedCount() {
+    const selected = document.querySelectorAll('.post-checkbox:checked').length;
+    const btn = document.getElementById('btnPostSelected');
+    const label = document.getElementById('wpSelectedLabel');
+    if (selected > 0 && wpConfigured) {
+        btn.classList.remove('d-none');
+        label.textContent = `WP (${selected})`;
+    } else {
+        btn.classList.add('d-none');
+    }
+}
+
+function getSelectedPostIds() {
+    return Array.from(document.querySelectorAll('.post-checkbox:checked')).map(cb => cb.value);
+}
+
+function postSelectedToWP() {
+    const ids = getSelectedPostIds();
+    if (!ids.length) return;
+
+    // Show scrap modal for WP progress
+    const bar = document.getElementById('scrapBar');
+    const msg = document.getElementById('scrapMessage');
+    bar.style.width = '0%';
+    bar.className = 'progress-bar progress-bar-striped progress-bar-animated';
+    msg.textContent = 'Mengupload ke WordPress...';
+    document.getElementById('wpProgress').classList.add('d-none');
+    document.getElementById('btnScrapClose').disabled = true;
+    new bootstrap.Modal(document.getElementById('scrapModal')).show();
+
+    const btn = document.getElementById('btnPostSelected');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span>';
+    postSessionToWP(ids);
+}
+
+async function postSessionToWP(postIds) {
     if (!activeSession) return alert('Pilih sesi terlebih dahulu');
     if (!wpConfigured) return alert('WordPress belum dikonfigurasi di .env');
 
     const btn = document.getElementById('btnPostToWP');
-    btn.disabled = true;
-    btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span>';
+    if (!postIds || !postIds.length) {
+        btn.disabled = true;
+        btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span>';
+    }
 
     try {
         const res = await fetch(`/api/sessions/${activeSession}/post-to-wp`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({}),
+            body: JSON.stringify({ post_ids: postIds || [] }),
         });
         const data = await res.json();
 
         if (data.error) {
             alert('Error: ' + data.error);
             btn.disabled = false;
-            btn.innerHTML = '<i class="bi bi-wordpress"></i> WP';
+            btn.innerHTML = '<i class="bi bi-wordpress"></i> WP All';
             return;
         }
 
-        pollWpStatus(data.progress_key, btn);
+        pollWpStatus(data.progress_key, postIds);
     } catch (e) {
         alert('Error: ' + e.message);
         btn.disabled = false;
-        btn.innerHTML = '<i class="bi bi-wordpress"></i> WP';
+        btn.innerHTML = '<i class="bi bi-wordpress"></i> WP All';
     }
 }
 
-function pollWpStatus(key, btn) {
+function pollWpStatus(key, postIds) {
+    const btnAll = document.getElementById('btnPostToWP');
+    const btnSel = document.getElementById('btnPostSelected');
+    const bar = document.getElementById('scrapBar');
+    const msg = document.getElementById('scrapMessage');
+    const wpProg = document.getElementById('wpProgress');
+    const wpBar = document.getElementById('wpBar');
+    const wpMsg = document.getElementById('wpMessage');
+    const closeBtn = document.getElementById('btnScrapClose');
+
+    const isSelective = postIds && postIds.length > 0;
+    const activeBtn = isSelective ? btnSel : btnAll;
+
     const timer = setInterval(async () => {
         try {
-            const res = await fetch(`/api/crawl/status?key=${encodeURIComponent(key)}`);
+            const res = await fetch(`/api/scrap/status?key=${encodeURIComponent(key)}`);
             const status = await res.json();
 
             if (status.wp_total > 0) {
-                btn.innerHTML = `<span class="spinner-border spinner-border-sm"></span> ${status.wp_posted}/${status.wp_total}`;
+                activeBtn.innerHTML = `<span class="spinner-border spinner-border-sm"></span> ${status.wp_posted}/${status.wp_total}`;
+
+                // Update modal if selective
+                if (isSelective) {
+                    wpProg.classList.remove('d-none');
+                    const wpPct = Math.round((status.wp_posted || 0) / status.wp_total * 100);
+                    wpBar.style.width = wpPct + '%';
+                    wpMsg.textContent = `WordPress: ${status.wp_posted || 0}/${status.wp_total} post`;
+                    msg.textContent = `Mengupload ${status.wp_posted || 0}/${status.wp_total} ke WordPress...`;
+                }
             }
 
             if (status.status === 'done') {
                 clearInterval(timer);
-                btn.disabled = false;
-                btn.innerHTML = '<i class="bi bi-wordpress"></i> WP';
+                bar.style.width = '100%';
+                bar.classList.remove('progress-bar-animated');
+                bar.classList.add('bg-success');
+                if (isSelective) {
+                    wpBar.style.width = '100%';
+                    wpBar.classList.remove('progress-bar-animated');
+                    msg.textContent = 'Selesai!';
+                }
+                activeBtn.disabled = false;
+                activeBtn.innerHTML = isSelective ? '<i class="bi bi-wordpress"></i> WP' : '<i class="bi bi-wordpress"></i> WP All';
                 const ok = (status.wp_results || []).filter(r => r.success).length;
                 const total = status.wp_total || ok;
-                alert(`WordPress: ${ok}/${total} post berhasil diupload sebagai draft`);
+                closeBtn.disabled = false;
+                pendingSessionId = null;
+                if (isSelective) {
+                    document.querySelectorAll('.post-checkbox:checked').forEach(cb => cb.checked = false);
+                    document.getElementById('selectAll').checked = false;
+                    updateSelectedCount();
+                }
             } else if (status.status === 'error') {
                 clearInterval(timer);
-                btn.disabled = false;
-                btn.innerHTML = '<i class="bi bi-wordpress"></i> WP';
-                alert('Error: ' + (status.message || 'Gagal upload ke WordPress'));
+                bar.classList.remove('progress-bar-animated');
+                bar.classList.add('bg-danger');
+                activeBtn.disabled = false;
+                activeBtn.innerHTML = isSelective ? '<i class="bi bi-wordpress"></i> WP' : '<i class="bi bi-wordpress"></i> WP All';
+                closeBtn.disabled = false;
             }
         } catch (e) {
             console.error('WP poll error:', e);
@@ -575,7 +673,7 @@ function escapeHtml(str) {
 
 function showError(msg) {
     document.getElementById('postsBody').innerHTML =
-        `<tr><td colspan="7" class="text-center py-5 text-danger">${escapeHtml(msg)}</td></tr>`;
+        `<tr><td colspan="8" class="text-center py-5 text-danger">${escapeHtml(msg)}</td></tr>`;
 }
 
 // --- Event Listeners ---
@@ -591,6 +689,101 @@ document.addEventListener('keydown', (e) => {
         if (modal) modal.hide();
     }
 });
+
+// --- Settings / Token ---
+async function openSettingsModal() {
+    document.getElementById('tokenStatus').innerHTML = '';
+    document.getElementById('btnUpdateToken').disabled = false;
+    document.getElementById('btnUpdateToken').innerHTML = '<i class="bi bi-check-circle"></i> Update & Test';
+
+    const infoEl = document.getElementById('settingsAccountInfo');
+    infoEl.innerHTML = '<em class="text-muted">Memuat info akun...</em>';
+
+    try {
+        const res = await fetch('/api/config/account');
+        const data = await res.json();
+        if (data.ok && data.account) {
+            const a = data.account;
+            infoEl.innerHTML = `
+                <div class="d-flex align-items-center gap-2 mb-1">
+                    <strong>@${a.username || '?'}</strong>
+                    <span class="badge bg-secondary">${a.name || ''}</span>
+                </div>
+                <div class="text-muted">${a.followers_count || 0} followers &middot; ${a.media_count || 0} posts</div>
+            `;
+            document.getElementById('navAccount').innerHTML = `
+                <i class="bi bi-instagram"></i> @${a.username || '?'}
+            `;
+        } else {
+            infoEl.innerHTML = `<span class="text-danger">Token error: ${escapeHtml(data.error || '?')}</span>`;
+        }
+    } catch (e) {
+        infoEl.innerHTML = `<span class="text-danger">Gagal memuat info akun</span>`;
+    }
+
+    // Load current token from .env — we show placeholder
+    document.getElementById('tokenInput').value = '';
+
+    const modal = new bootstrap.Modal(document.getElementById('settingsModal'));
+    modal.show();
+}
+
+async function updateToken() {
+    const token = document.getElementById('tokenInput').value.trim();
+    const btn = document.getElementById('btnUpdateToken');
+    const status = document.getElementById('tokenStatus');
+
+    if (!token) {
+        status.innerHTML = '<span class="text-danger">Token tidak boleh kosong</span>';
+        return;
+    }
+
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Updating...';
+    status.innerHTML = '';
+
+    try {
+        const res = await fetch('/api/config/token', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ access_token: token }),
+        });
+        const data = await res.json();
+
+        if (data.error) {
+            status.innerHTML = `<span class="text-danger">${escapeHtml(data.error)}</span>`;
+            btn.disabled = false;
+            btn.innerHTML = '<i class="bi bi-check-circle"></i> Update & Test';
+            return;
+        }
+
+        status.innerHTML = '<span class="text-success">Token tersimpan. Menguji...</span>';
+
+        // Test the new token
+        const testRes = await fetch('/api/config/ig-test');
+        const testData = await testRes.json();
+
+        if (testData.ok) {
+            status.innerHTML = `<span class="text-success">${escapeHtml(testData.message)}</span>`;
+            document.getElementById('settingsAccountInfo').innerHTML = `
+                <div class="d-flex align-items-center gap-2 mb-1">
+                    <strong>@${testData.username || '?'}</strong>
+                </div>
+                <div class="text-muted">${testData.followers || 0} followers</div>
+            `;
+            document.getElementById('navAccount').innerHTML = `
+                <i class="bi bi-instagram"></i> @${testData.username || '?'}
+            `;
+        } else {
+            status.innerHTML = `<span class="text-warning">Token tersimpan, tapi gagal verifikasi: ${escapeHtml(testData.error || '?')}</span>`;
+        }
+    } catch (e) {
+        status.innerHTML = `<span class="text-danger">Error: ${escapeHtml(e.message)}</span>`;
+    }
+
+    btn.disabled = false;
+    btn.innerHTML = '<i class="bi bi-check-circle"></i> Update & Test';
+}
 
 // --- Init ---
 checkWpStatus();

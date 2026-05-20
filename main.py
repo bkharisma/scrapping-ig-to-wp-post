@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from config import ACCESS_TOKEN, IG_USER_ID, DATE_FROM, DATE_TO, OUTPUT_DIR
-from crawler import InstagramCrawler
+from scrapper import InstagramScrapper
 from downloader import download_media
 
 logging.basicConfig(
@@ -65,11 +65,11 @@ def main():
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    crawler = InstagramCrawler()
+    scraper = InstagramScrapper()
 
     logger.info("Mengambil info akun...")
     try:
-        info = crawler.get_account_info()
+        info = scraper.get_account_info()
         logger.info(f"Akun: @{info.get('username')} ({info.get('name')})")
         logger.info(f"Followers: {info.get('followers_count')} | Total post: {info.get('media_count')}")
     except Exception as e:
@@ -77,7 +77,7 @@ def main():
 
     logger.info(f"Mengambil post (periode: {DATE_FROM or 'awal'} ~ {DATE_TO or 'sekarang'})...")
     try:
-        posts = crawler.fetch_all_media(DATE_FROM, DATE_TO)
+        posts = scraper.fetch_all_media(DATE_FROM, DATE_TO)
     except Exception as e:
         logger.error(f"Gagal mengambil media: {e}")
         sys.exit(1)

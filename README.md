@@ -15,6 +15,7 @@ Aplikasi untuk mengambil foto, video, dan caption dari Instagram Business/Creato
 - [API Endpoints](#api-endpoints)
 - [Detail File](#detail-file)
 - [Cara Mendapatkan Token & ID](#cara-mendapatkan-token--id)
+- [Deployment & Maintenance](#deployment--maintenance-production)
 - [Teknologi](#teknologi)
 
 ---
@@ -242,6 +243,10 @@ Semua endpoint di bawah digunakan oleh dashboard frontend:
 | `GET` | `/api/sessions/<id>/csv` | Download caption CSV |
 | `GET` | `/api/sessions/<id>/images` | Download semua media (ZIP) |
 | `GET` | `/api/media/<id>/<filepath>` | Sajikan file media individual |
+| `GET` | `/api/wp/status` | Status konfigurasi WordPress |
+| `GET` | `/api/wp/test` | Test koneksi WordPress |
+| `POST` | `/api/config/token` | Update ACCESS_TOKEN di `.env` |
+| `GET` | `/api/config/ig-test` | Test validitas ACCESS_TOKEN |
 
 ### Query Parameters `/api/sessions/<id>/posts`
 
@@ -324,6 +329,62 @@ curl "https://graph.facebook.com/v21.0/me/accounts?access_token={TOKEN}"
 # Step 2: Dapatkan IG Business Account ID dari Page ID
 curl "https://graph.facebook.com/v21.0/{page_id}?fields=instagram_business_account&access_token={TOKEN}"
 ```
+
+---
+
+## Deployment & Maintenance (Production)
+
+Deployment menggunakan **Gunicorn + Nginx** di Ubuntu 24.04.
+
+### Lokasi Deployment
+
+```
+/opt/scrapping-ig-to-wp-post/   # Root project
+/var/log/craw-ig/               # Log files
+/etc/systemd/system/craw-ig.service  # Systemd service
+/etc/nginx/sites-available/craw-ig   # Nginx config
+/etc/logrotate.d/craw-ig        # Log rotation
+```
+
+### Perintah Maintenance
+
+```bash
+# Restart app (setelah update code / .env)
+sudo systemctl restart craw-ig
+
+# Lihat realtime log
+journalctl -u craw-ig -f
+
+# Cek status service
+sudo systemctl status craw-ig
+
+# Update code dari laptop
+rsync -avz --exclude '.venv' --exclude '__pycache__' --exclude '.git' \
+  /path/lokal/project/ user@server:/opt/scrapping-ig-to-wp-post/
+sudo systemctl restart craw-ig
+
+# Cek Nginx status
+sudo systemctl status nginx
+
+# Reload Nginx config
+sudo nginx -t && sudo systemctl reload nginx
+
+# Akses dashboard
+# http://<server-ip>/
+```
+
+### Update ACCESS_TOKEN dari Dashboard
+
+Jika token Instagram error, bisa diperbarui langsung dari dashboard:
+
+1. Klik ikon **Settings** (gear) di pojok kanan navbar
+2. Masukkan token baru
+3. Klik "Update & Test"
+4. Jika valid, token langsung tersimpan di `.env` dan aktif tanpa restart
+
+### Log Rotation
+
+Log di `/var/log/craw-ig/` dirotasi otomatis setiap hari dan disimpan 14 hari.
 
 ---
 
