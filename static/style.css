@@ -185,3 +185,27 @@ body {
 
 .modal-nav-btn.prev { left: 10px; }
 .modal-nav-btn.next { right: 10px; }
+
+#analyticsCard .progress {
+    border-radius: 4px;
+    background-color: #e9ecef;
+}
+
+#analyticsCard .progress-bar {
+    font-size: 0.7rem;
+    line-height: 16px;
+    padding-left: 4px;
+    text-align: left;
+    white-space: nowrap;
+    overflow: visible;
+}
+
+#analyticsCard h6 {
+    font-size: 0.8rem;
+    font-weight: 600;
+}
+
+#analyticsCard .btn-group .btn {
+    font-size: 0.75rem;
+    padding: 2px 10px;
+}

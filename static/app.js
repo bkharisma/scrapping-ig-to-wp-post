@@ -18,8 +18,13 @@ async function loadSessions() {
         }
 
         el.innerHTML = sessions.map(s => `
-            <div class="session-item${activeSession === s.session_id ? ' active' : ''}"
+            <div class="session-item position-relative${activeSession === s.session_id ? ' active' : ''}"
                  onclick="switchSession('${s.session_id}')">
+                <button class="btn btn-sm text-danger position-absolute top-0 end-0 p-1"
+                        onclick="event.stopPropagation(); deleteSession('${s.session_id}')"
+                        title="Hapus sesi ini">
+                    <i class="bi bi-trash"></i>
+                </button>
                 <div class="fw-semibold small">${s.date}</div>
                 <div class="d-flex justify-content-between small">
                     <span>${s.total_posts} post</span>
@@ -30,6 +35,37 @@ async function loadSessions() {
         `).join('');
     } catch (e) {
         console.error('Failed to load sessions:', e);
+    }
+}
+
+async function deleteSession(sessionId) {
+    if (!confirm(`Hapus sesi ${sessionId} beserta semua data dan media-nya?`)) return;
+
+    try {
+        const res = await fetch(`/api/sessions/${sessionId}`, { method: 'DELETE' });
+        const data = await res.json();
+
+        if (data.error) {
+            alert('Gagal menghapus: ' + data.error);
+            return;
+        }
+
+        if (activeSession === sessionId) {
+            activeSession = null;
+            currentPage = 1;
+            document.getElementById('activeSessionLabel').textContent = 'Pilih sesi scrap';
+            document.getElementById('postCount').textContent = '0';
+            document.getElementById('postsBody').innerHTML =
+                '<tr><td colspan="8" class="text-center py-5 text-muted">Pilih sesi di sebelah kiri</td></tr>';
+            document.getElementById('pagination').innerHTML = '';
+            document.getElementById('paginationInfo').textContent = '0 hasil';
+            document.getElementById('statsCard').classList.add('d-none');
+            document.getElementById('analyticsCard').classList.add('d-none');
+        }
+
+        loadSessions();
+    } catch (e) {
+        alert('Error: ' + e.message);
     }
 }
 
@@ -46,6 +82,7 @@ async function switchSession(sessionId) {
     loadSessions();
 
     await loadStats(sessionId);
+    await loadAnalytics(sessionId);
     await loadPosts();
 }
 
@@ -205,6 +242,232 @@ async function loadStats(sessionId) {
     } catch (e) {
         console.error('Failed to load stats:', e);
     }
+}
+
+// --- Analytics ---
+let analyticsData = {};
+
+async function loadAnalytics(sessionId) {
+    analyticsData = {};
+    try {
+        const [eng, sent, ins] = await Promise.all([
+            fetch(`/api/sessions/${sessionId}/analytics/engagement`).then(r => r.json()),
+            fetch(`/api/sessions/${sessionId}/analytics/sentiment`).then(r => r.json()),
+            fetch(`/api/sessions/${sessionId}/analytics/insights`).then(r => r.json()),
+        ]);
+        analyticsData = { engagement: eng, sentiment: sent, insights: ins };
+        document.getElementById('analyticsCard').classList.remove('d-none');
+        renderAnalyticsTab('engagement');
+    } catch (e) {
+        console.error('Failed to load analytics:', e);
+    }
+}
+
+function switchAnalyticsTab(tab) {
+    document.querySelectorAll('#analyticsCard .btn-group .btn').forEach(b => b.classList.remove('active'));
+    const btnMap = { engagement: 'tabEngagement', sentiment: 'tabSentiment', insights: 'tabInsights' };
+    document.getElementById(btnMap[tab]).classList.add('active');
+    renderAnalyticsTab(tab);
+}
+
+function renderAnalyticsTab(tab) {
+    if (tab === 'engagement') renderEngagement();
+    else if (tab === 'sentiment') renderSentiment();
+    else if (tab === 'insights') renderInsights();
+}
+
+function renderEngagement() {
+    const d = analyticsData.engagement;
+    if (!d || d.error) {
+        document.getElementById('analyticsContent').innerHTML = '<div class="text-center py-3 text-muted small">Data tidak tersedia</div>';
+        return;
+    }
+
+    const typeLabels = { IMAGE: 'Foto', VIDEO: 'Video', CAROUSEL_ALBUM: 'Album' };
+    let typeHtml = '';
+    for (const [k, v] of Object.entries(d.by_media_type || {})) {
+        const pct = d.average_engagement_rate ? ((v.avg_engagement_rate / d.average_engagement_rate) * 100).toFixed(0) : 0;
+        typeHtml += `<div class="mb-1"><span class="badge bg-secondary me-1">${typeLabels[k] || k}</span> <span class="fw-semibold">${v.avg_engagement_rate}%</span> <small class="text-muted">(${v.count} post, ${pct}% dari rata2)</small></div>`;
+    }
+
+    let trendHtml = '';
+    for (const [m, val] of Object.entries(d.monthly_trend || {})) {
+        const max = Math.max(...Object.values(d.monthly_trend || {0:1}));
+        const barPct = (val / max * 100).toFixed(0);
+        trendHtml += `<div class="mb-1"><small class="text-muted">${m}</small><div class="progress" style="height:16px"><div class="progress-bar bg-info" style="width:${barPct}%">${val}%</div></div></div>`;
+    }
+
+    let topHtml = '';
+    (d.top_5_posts || []).forEach((p, i) => {
+        topHtml += `<div class="mb-1 small"><span class="badge bg-light text-dark me-1">#${i+1}</span> ${p.engagement_rate}% — ${escapeHtml((p.caption || '').substring(0, 60))}</div>`;
+    });
+
+    document.getElementById('analyticsContent').innerHTML = `
+    <div class="row g-2">
+        <div class="col-md-8">
+            <div class="row g-2 mb-2">
+                <div class="col-4">
+                    <div class="p-2 bg-light rounded text-center">
+                        <div class="fw-bold fs-5">${d.average_engagement_rate}%</div>
+                        <small class="text-muted">Rata-rata ER</small>
+                    </div>
+                </div>
+                <div class="col-4">
+                    <div class="p-2 bg-light rounded text-center">
+                        <div class="fw-bold fs-5">${(d.total_interactions || 0).toLocaleString()}</div>
+                        <small class="text-muted">Total Interaksi</small>
+                    </div>
+                </div>
+                <div class="col-4">
+                    <div class="p-2 bg-light rounded text-center">
+                        <div class="fw-bold fs-5">${(d.followers_count || 0).toLocaleString()}</div>
+                        <small class="text-muted">Followers</small>
+                    </div>
+                </div>
+            </div>
+            <h6 class="mb-1">Per Tipe Media</h6>
+            ${typeHtml || '<small class="text-muted">Tidak ada data</small>'}
+        </div>
+        <div class="col-md-4">
+            <h6 class="mb-1">Tren Bulanan</h6>
+            ${trendHtml || '<small class="text-muted">Tidak ada data</small>'}
+            <hr class="my-1">
+            <h6 class="mb-1">Top 5 Post</h6>
+            ${topHtml || '<small class="text-muted">Tidak ada data</small>'}
+        </div>
+    </div>`;
+}
+
+function renderSentiment() {
+    const d = analyticsData.sentiment;
+    if (!d || d.error) {
+        document.getElementById('analyticsContent').innerHTML = '<div class="text-center py-3 text-muted small">Data tidak tersedia</div>';
+        return;
+    }
+
+    const pct = d.distribution_pct || {};
+    const dist = d.distribution || {};
+
+    function bar(label, pctVal, count, color) {
+        return `<div class="mb-1"><span class="badge bg-${color} me-1">${label}</span> ${pctVal}% <small class="text-muted">(${count} post)</small><div class="progress" style="height:20px"><div class="progress-bar bg-${color}" style="width:${pctVal}%"></div></div></div>`;
+    }
+
+    let topPosHtml = '';
+    (d.top_positive || []).forEach(p => {
+        topPosHtml += `<div class="mb-1 small">+${p.score} ${escapeHtml((p.caption || '').substring(0, 60))}</div>`;
+    });
+
+    let topNegHtml = '';
+    (d.top_negative || []).forEach(p => {
+        topNegHtml += `<div class="mb-1 small">${p.score} ${escapeHtml((p.caption || '').substring(0, 60))}</div>`;
+    });
+
+    document.getElementById('analyticsContent').innerHTML = `
+    <div class="row g-2">
+        <div class="col-md-5">
+            <h6 class="mb-1">Distribusi Sentimen</h6>
+            ${bar('Positif', pct.positive || 0, dist.positive || 0, 'success')}
+            ${bar('Netral', pct.neutral || 0, dist.neutral || 0, 'secondary')}
+            ${bar('Negatif', pct.negative || 0, dist.negative || 0, 'danger')}
+        </div>
+        <div class="col-md-3">
+            <h6 class="mb-1">Paling Positif</h6>
+            ${topPosHtml || '<small class="text-muted">Tidak ada</small>'}
+        </div>
+        <div class="col-md-3">
+            <h6 class="mb-1">Paling Negatif</h6>
+            ${topNegHtml || '<small class="text-muted">Tidak ada</small>'}
+        </div>
+        <div class="col-md-1 text-center">
+            <div class="fw-bold fs-5">${d.total_posts || 0}</div>
+            <small class="text-muted">Total</small>
+        </div>
+    </div>`;
+}
+
+function renderInsights() {
+    const d = analyticsData.insights;
+    if (!d || d.error) {
+        document.getElementById('analyticsContent').innerHTML = '<div class="text-center py-3 text-muted small">Data tidak tersedia</div>';
+        return;
+    }
+
+    let dayHtml = '';
+    const dayOrder = ['Senin','Selasa','Rabu','Kamis','Jumat','Sabtu','Minggu'];
+    const dayVals = d.day_breakdown || {};
+    const maxDay = Math.max(...Object.values(dayVals).map(v => v.avg_interactions || 0), 1);
+    dayOrder.forEach(day => {
+        const info = dayVals[day];
+        if (info) {
+            const pct = (info.avg_interactions / maxDay * 100).toFixed(0);
+            dayHtml += `<div class="mb-1"><small class="text-muted">${day}</small><div class="progress" style="height:16px"><div class="progress-bar ${day === d.best_posting_day ? 'bg-success' : 'bg-info'}" style="width:${pct}%">${info.avg_interactions} (${info.count} post)</div></div></div>`;
+        }
+    });
+
+    let hashtagHtml = '';
+    (d.top_hashtags || []).slice(0, 10).forEach(h => {
+        hashtagHtml += `<span class="badge bg-light text-dark me-1 mb-1">#${h.tag} <small class="text-muted">${h.frequency}x, ${h.avg_interactions} int.</small></span>`;
+    });
+
+    let captionHtml = '';
+    const buckets = d.caption_length_insight || {};
+    const maxBucket = Math.max(...Object.values(buckets).map(v => v.avg_interactions || 0), 1);
+    for (const [bucket, info] of Object.entries(buckets)) {
+        const pct = (info.avg_interactions / maxBucket * 100).toFixed(0);
+        captionHtml += `<div class="mb-1"><small class="text-muted">${bucket} karakter</small><div class="progress" style="height:16px"><div class="progress-bar bg-warning text-dark" style="width:${pct}%">${info.avg_interactions} int. (${info.count} post)</div></div></div>`;
+    }
+
+    const typeLabels = { IMAGE: 'Foto', VIDEO: 'Video', CAROUSEL_ALBUM: 'Album' };
+    let typeHtml = '';
+    const typePerf = d.media_type_performance || {};
+    const maxType = Math.max(...Object.values(typePerf).map(v => v.avg_engagement_rate || 0), 0.001);
+    for (const [k, v] of Object.entries(typePerf)) {
+        const pct = (v.avg_engagement_rate / maxType * 100).toFixed(0);
+        typeHtml += `<div class="mb-1"><span class="badge bg-secondary me-1">${typeLabels[k] || k}</span><div class="progress" style="height:16px"><div class="progress-bar ${k === d.best_media_type ? 'bg-success' : 'bg-primary'}" style="width:${pct}%">${v.avg_engagement_rate}% (${v.count} post)</div></div></div>`;
+    }
+
+    const cons = d.engagement_consistency || {};
+
+    document.getElementById('analyticsContent').innerHTML = `
+    <div class="row g-2">
+        <div class="col-md-6">
+            <h6 class="mb-1">Performa per Hari</h6>
+            <small class="text-muted d-block mb-1">Hari terbaik: <strong>${d.best_posting_day || '-'}</strong></small>
+            ${dayHtml || '<small class="text-muted">Tidak ada data</small>'}
+            <hr class="my-1">
+            <h6 class="mb-1">Performa Tipe Konten</h6>
+            <small class="text-muted d-block mb-1">Terbaik: <strong>${typeLabels[d.best_media_type] || d.best_media_type || '-'}</strong></small>
+            ${typeHtml || '<small class="text-muted">Tidak ada data</small>'}
+        </div>
+        <div class="col-md-6">
+            <h6 class="mb-1">Konsistensi Engagement</h6>
+            <div class="row g-1 mb-2">
+                <div class="col-4">
+                    <div class="p-1 bg-light rounded text-center">
+                        <div class="fw-bold">${cons.average_interactions || 0}</div>
+                        <small class="text-muted">Rata-rata</small>
+                    </div>
+                </div>
+                <div class="col-4">
+                    <div class="p-1 bg-light rounded text-center">
+                        <div class="fw-bold">${cons.coefficient_of_variation_pct || 0}%</div>
+                        <small class="text-muted">CV</small>
+                    </div>
+                </div>
+                <div class="col-4">
+                    <div class="p-1 bg-light rounded text-center">
+                        <div class="fw-bold small">${cons.interpretation || '-'}</div>
+                        <small class="text-muted">Status</small>
+                    </div>
+                </div>
+            </div>
+            <h6 class="mb-1">Hash Tag Populer</h6>
+            <div>${hashtagHtml || '<small class="text-muted">Tidak ada hashtag</small>'}</div>
+            <hr class="my-1">
+            <h6 class="mb-1">Panjang Caption vs Interaksi</h6>
+            ${captionHtml || '<small class="text-muted">Tidak ada data</small>'}
+        </div>
+    </div>`;
 }
 
 async function startScrap() {

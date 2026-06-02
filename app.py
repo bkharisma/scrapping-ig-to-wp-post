@@ -4,6 +4,7 @@ import threading
 import io
 import zipfile
 import re
+import shutil
 from pathlib import Path
 from datetime import datetime
 
@@ -16,6 +17,7 @@ from config import ACCESS_TOKEN, IG_USER_ID, WP_ENABLED, WP_URL, WP_USER, WP_APP
 from scrapper import InstagramScrapper
 from downloader import download_media_organized
 from exporter import export_captions_csv
+from analytics import analyze_engagement, analyze_sentiment, analyze_target_market
 
 logging.basicConfig(
     level=logging.INFO,
@@ -239,6 +241,25 @@ def list_sessions():
     return jsonify(get_session_index())
 
 
+@app.route("/api/sessions/<session_id>", methods=["DELETE"])
+def delete_session(session_id):
+    session_dir = CRAWLS_DIR / session_id
+    if not session_dir.exists():
+        return jsonify({"error": "Session tidak ditemukan"}), 404
+
+    try:
+        shutil.rmtree(session_dir)
+
+        index = get_session_index()
+        index = [e for e in index if e.get("session_id") != session_id]
+        save_session_index(index)
+
+        return jsonify({"ok": True, "message": f"Sesi {session_id} berhasil dihapus"})
+    except Exception as e:
+        logger.exception(f"Gagal menghapus sesi {session_id}")
+        return jsonify({"error": f"Gagal menghapus sesi: {str(e)}"}), 500
+
+
 @app.route("/api/sessions/<session_id>/posts")
 def get_session_posts(session_id):
     page = request.args.get("page", 1, type=int)
@@ -338,6 +359,57 @@ def get_session_stats(session_id):
             "to": max(dates) if dates else "",
         } if dates else None,
     })
+
+
+@app.route("/api/sessions/<session_id>/analytics/engagement")
+def session_engagement(session_id):
+    meta_path = CRAWLS_DIR / session_id / "metadata.json"
+    if not meta_path.exists():
+        return jsonify({"error": "Session not found"}), 404
+
+    posts = json.loads(meta_path.read_text(encoding="utf-8"))
+
+    try:
+        scraper = InstagramScrapper()
+        account = scraper.get_account_info()
+        followers = account.get("followers_count", 0)
+    except Exception as e:
+        logger.warning(f"Gagal ambil followers count: {e}")
+        followers = 0
+
+    result = analyze_engagement(posts, followers)
+    return jsonify(result)
+
+
+@app.route("/api/sessions/<session_id>/analytics/sentiment")
+def session_sentiment(session_id):
+    meta_path = CRAWLS_DIR / session_id / "metadata.json"
+    if not meta_path.exists():
+        return jsonify({"error": "Session not found"}), 404
+
+    posts = json.loads(meta_path.read_text(encoding="utf-8"))
+    result = analyze_sentiment(posts)
+    return jsonify(result)
+
+
+@app.route("/api/sessions/<session_id>/analytics/insights")
+def session_insights(session_id):
+    meta_path = CRAWLS_DIR / session_id / "metadata.json"
+    if not meta_path.exists():
+        return jsonify({"error": "Session not found"}), 404
+
+    posts = json.loads(meta_path.read_text(encoding="utf-8"))
+
+    try:
+        scraper = InstagramScrapper()
+        account = scraper.get_account_info()
+        followers = account.get("followers_count", 0)
+    except Exception as e:
+        logger.warning(f"Gagal ambil followers count: {e}")
+        followers = 0
+
+    result = analyze_target_market(posts, followers)
+    return jsonify(result)
 
 
 @app.route("/api/sessions/<session_id>/csv")
@@ -472,32 +544,35 @@ def wp_post_task(session_id: str, post_ids: list[str], progress_key: str):
 
 @app.route("/api/config/token", methods=["POST"])
 def update_token():
-    data = request.get_json()
-    new_token = (data.get("access_token") or "").strip()
-    if not new_token:
-        return jsonify({"error": "Token tidak boleh kosong"}), 400
+    try:
+        data = request.get_json(silent=True) or {}
+        new_token = (data.get("access_token") or "").strip()
+        if not new_token:
+            return jsonify({"error": "Token tidak boleh kosong"}), 400
 
-    env_path = Path(".env")
-    if not env_path.exists():
-        return jsonify({"error": "File .env tidak ditemukan"}), 500
+        env_path = Path(".env")
+        if not env_path.exists():
+            return jsonify({"error": "File .env tidak ditemukan"}), 500
 
-    content = env_path.read_text(encoding="utf-8")
-    if re.search(r"^ACCESS_TOKEN=", content, re.MULTILINE):
-        content = re.sub(r"^ACCESS_TOKEN=.*", f"ACCESS_TOKEN={new_token}", content, flags=re.MULTILINE)
-    else:
-        content += f"\nACCESS_TOKEN={new_token}\n"
-    env_path.write_text(content, encoding="utf-8")
+        content = env_path.read_text(encoding="utf-8")
+        if re.search(r"^ACCESS_TOKEN=", content, re.MULTILINE):
+            content = re.sub(r"^ACCESS_TOKEN=.*", f"ACCESS_TOKEN={new_token}", content, flags=re.MULTILINE)
+        else:
+            content += f"\nACCESS_TOKEN={new_token}\n"
+        env_path.write_text(content, encoding="utf-8")
 
-    import config
-    config.ACCESS_TOKEN = new_token
+        import config
+        import scrapper
+        config.ACCESS_TOKEN = new_token
+        scrapper.ACCESS_TOKEN = new_token
 
-    import scrapper
-    scrapper.ACCESS_TOKEN = new_token
+        global ACCESS_TOKEN
+        ACCESS_TOKEN = new_token
 
-    global ACCESS_TOKEN
-    ACCESS_TOKEN = new_token
-
-    return jsonify({"ok": True, "message": "Token berhasil diperbarui"})
+        return jsonify({"ok": True, "message": "Token berhasil diperbarui"})
+    except Exception as e:
+        logger.exception("Gagal memperbarui token")
+        return jsonify({"error": f"Gagal memperbarui token: {str(e)}"}), 500
 
 
 @app.route("/api/config/ig-test")

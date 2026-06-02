@@ -87,6 +87,21 @@
                 <div class="card-body py-2" id="statsContent"></div>
             </div>
 
+            <!-- Analytics -->
+            <div class="card shadow-sm mb-3 d-none" id="analyticsCard">
+                <div class="card-header py-2 d-flex justify-content-between align-items-center">
+                    <span><i class="bi bi-graph-up"></i> Analitik</span>
+                    <div class="btn-group btn-group-sm" role="group">
+                        <button type="button" class="btn btn-outline-primary active" id="tabEngagement" onclick="switchAnalyticsTab('engagement')">Engagement</button>
+                        <button type="button" class="btn btn-outline-primary" id="tabSentiment" onclick="switchAnalyticsTab('sentiment')">Sentimen</button>
+                        <button type="button" class="btn btn-outline-primary" id="tabInsights" onclick="switchAnalyticsTab('insights')">Insight Pasar</button>
+                    </div>
+                </div>
+                <div class="card-body py-2" id="analyticsContent">
+                    <div class="text-center py-4 text-muted small">Memuat analitik...</div>
+                </div>
+            </div>
+
             <!-- Posts Table -->
             <div class="card shadow-sm">
                 <div class="card-header py-2 d-flex justify-content-between align-items-center flex-wrap gap-2">
