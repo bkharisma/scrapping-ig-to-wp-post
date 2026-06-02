@@ -251,16 +251,24 @@ async function loadStats(sessionId) {
 
 // --- Analytics ---
 let analyticsData = {};
+let chartInstances = {};
 
 async function loadAnalytics(sessionId) {
     analyticsData = {};
+    destroyAllCharts();
     try {
-        const [eng, sent, ins] = await Promise.all([
+        const [eng, sent, ins, bestTime, wc, cats] = await Promise.all([
             fetch(`/api/sessions/${sessionId}/analytics/engagement`).then(r => r.json()),
             fetch(`/api/sessions/${sessionId}/analytics/sentiment`).then(r => r.json()),
             fetch(`/api/sessions/${sessionId}/analytics/insights`).then(r => r.json()),
+            fetch(`/api/sessions/${sessionId}/analytics/best-time`).then(r => r.json()),
+            fetch(`/api/sessions/${sessionId}/analytics/wordcloud?max=80`).then(r => r.json()),
+            fetch(`/api/sessions/${sessionId}/analytics/content-categories`).then(r => r.json()),
         ]);
-        analyticsData = { engagement: eng, sentiment: sent, insights: ins };
+        analyticsData = {
+            engagement: eng, sentiment: sent, insights: ins,
+            bestTime: bestTime, wordcloud: wc, categories: cats,
+        };
         document.getElementById('analyticsCard').classList.remove('d-none');
         renderAnalyticsTab('engagement');
     } catch (e) {
@@ -270,15 +278,29 @@ async function loadAnalytics(sessionId) {
 
 function switchAnalyticsTab(tab) {
     document.querySelectorAll('#analyticsCard .btn-group .btn').forEach(b => b.classList.remove('active'));
-    const btnMap = { engagement: 'tabEngagement', sentiment: 'tabSentiment', insights: 'tabInsights' };
+    const btnMap = {
+        engagement: 'tabEngagement', sentiment: 'tabSentiment',
+        insights: 'tabInsights', bestTime: 'tabBestTime',
+        wordcloud: 'tabWordCloud', categories: 'tabCategories',
+    };
     document.getElementById(btnMap[tab]).classList.add('active');
     renderAnalyticsTab(tab);
 }
 
 function renderAnalyticsTab(tab) {
+    destroyAllCharts();
     if (tab === 'engagement') renderEngagement();
     else if (tab === 'sentiment') renderSentiment();
     else if (tab === 'insights') renderInsights();
+    else if (tab === 'bestTime') renderBestTime();
+    else if (tab === 'wordcloud') renderWordCloud();
+    else if (tab === 'categories') renderCategories();
+}
+
+function destroyAllCharts() {
+    Object.values(chartInstances).forEach(c => { if (c) c.destroy(); });
+    chartInstances = {};
+    document.querySelectorAll('#analyticsContent canvas').forEach(c => c.remove());
 }
 
 function renderEngagement() {
@@ -295,13 +317,6 @@ function renderEngagement() {
         typeHtml += `<div class="mb-1"><span class="badge bg-secondary me-1">${typeLabels[k] || k}</span> <span class="fw-semibold">${v.avg_engagement_rate}%</span> <small class="text-muted">(${v.count} post, ${pct}% dari rata2)</small></div>`;
     }
 
-    let trendHtml = '';
-    for (const [m, val] of Object.entries(d.monthly_trend || {})) {
-        const max = Math.max(...Object.values(d.monthly_trend || {0:1}));
-        const barPct = (val / max * 100).toFixed(0);
-        trendHtml += `<div class="mb-1"><small class="text-muted">${m}</small><div class="progress" style="height:16px"><div class="progress-bar bg-info" style="width:${barPct}%">${val}%</div></div></div>`;
-    }
-
     let topHtml = '';
     (d.top_5_posts || []).forEach((p, i) => {
         topHtml += `<div class="mb-1 small"><span class="badge bg-light text-dark me-1">#${i+1}</span> ${p.engagement_rate}% — ${escapeHtml((p.caption || '').substring(0, 60))}</div>`;
@@ -309,7 +324,7 @@ function renderEngagement() {
 
     document.getElementById('analyticsContent').innerHTML = `
     <div class="row g-2">
-        <div class="col-md-8">
+        <div class="col-md-7">
             <div class="row g-2 mb-2">
                 <div class="col-4">
                     <div class="p-2 bg-light rounded text-center">
@@ -332,15 +347,43 @@ function renderEngagement() {
             </div>
             <h6 class="mb-1">Per Tipe Media</h6>
             ${typeHtml || '<small class="text-muted">Tidak ada data</small>'}
-        </div>
-        <div class="col-md-4">
-            <h6 class="mb-1">Tren Bulanan</h6>
-            ${trendHtml || '<small class="text-muted">Tidak ada data</small>'}
             <hr class="my-1">
             <h6 class="mb-1">Top 5 Post</h6>
             ${topHtml || '<small class="text-muted">Tidak ada data</small>'}
         </div>
+        <div class="col-md-5">
+            <h6 class="mb-1">Tren Engagement Bulanan</h6>
+            <canvas id="chartEngagementTrend" height="200"></canvas>
+        </div>
     </div>`;
+
+    const months = Object.keys(d.monthly_trend || {});
+    const values = Object.values(d.monthly_trend || {});
+    if (months.length) {
+        const ctx = document.getElementById('chartEngagementTrend').getContext('2d');
+        chartInstances.engagement = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: months,
+                datasets: [{
+                    label: 'Engagement Rate (%)',
+                    data: values,
+                    borderColor: '#0d6efd',
+                    backgroundColor: 'rgba(13,110,253,0.1)',
+                    fill: true,
+                    tension: 0.3,
+                    pointBackgroundColor: '#0d6efd',
+                }]
+            },
+            options: {
+                responsive: true,
+                plugins: { legend: { display: false } },
+                scales: {
+                    y: { beginAtZero: true, ticks: { callback: v => v + '%' } }
+                }
+            }
+        });
+    }
 }
 
 function renderSentiment() {
@@ -369,25 +412,44 @@ function renderSentiment() {
 
     document.getElementById('analyticsContent').innerHTML = `
     <div class="row g-2">
-        <div class="col-md-5">
+        <div class="col-md-4">
             <h6 class="mb-1">Distribusi Sentimen</h6>
+            <canvas id="chartSentiment" height="180"></canvas>
+        </div>
+        <div class="col-md-4">
             ${bar('Positif', pct.positive || 0, dist.positive || 0, 'success')}
             ${bar('Netral', pct.neutral || 0, dist.neutral || 0, 'secondary')}
             ${bar('Negatif', pct.negative || 0, dist.negative || 0, 'danger')}
+            <div class="fw-bold fs-5 text-center mt-1">${d.total_posts || 0} <small class="text-muted fs-6">total post</small></div>
         </div>
-        <div class="col-md-3">
+        <div class="col-md-2">
             <h6 class="mb-1">Paling Positif</h6>
             ${topPosHtml || '<small class="text-muted">Tidak ada</small>'}
         </div>
-        <div class="col-md-3">
+        <div class="col-md-2">
             <h6 class="mb-1">Paling Negatif</h6>
             ${topNegHtml || '<small class="text-muted">Tidak ada</small>'}
         </div>
-        <div class="col-md-1 text-center">
-            <div class="fw-bold fs-5">${d.total_posts || 0}</div>
-            <small class="text-muted">Total</small>
-        </div>
     </div>`;
+
+    setTimeout(() => {
+        const ctx = document.getElementById('chartSentiment');
+        if (!ctx) return;
+        chartInstances.sentiment = new Chart(ctx.getContext('2d'), {
+            type: 'doughnut',
+            data: {
+                labels: ['Positif', 'Netral', 'Negatif'],
+                datasets: [{
+                    data: [dist.positive || 0, dist.neutral || 0, dist.negative || 0],
+                    backgroundColor: ['#198754', '#6c757d', '#dc3545'],
+                }]
+            },
+            options: {
+                responsive: true,
+                plugins: { legend: { position: 'bottom', labels: { boxWidth: 12, font: { size: 10 } } } }
+            }
+        });
+    }, 100);
 }
 
 function renderInsights() {
@@ -438,7 +500,7 @@ function renderInsights() {
         <div class="col-md-6">
             <h6 class="mb-1">Performa per Hari</h6>
             <small class="text-muted d-block mb-1">Hari terbaik: <strong>${d.best_posting_day || '-'}</strong></small>
-            ${dayHtml || '<small class="text-muted">Tidak ada data</small>'}
+            <canvas id="chartDayBreakdown" height="140"></canvas>
             <hr class="my-1">
             <h6 class="mb-1">Performa Tipe Konten</h6>
             <small class="text-muted d-block mb-1">Terbaik: <strong>${typeLabels[d.best_media_type] || d.best_media_type || '-'}</strong></small>
@@ -473,6 +535,224 @@ function renderInsights() {
             ${captionHtml || '<small class="text-muted">Tidak ada data</small>'}
         </div>
     </div>`;
+
+    setTimeout(() => {
+        const dayCtx = document.getElementById('chartDayBreakdown');
+        if (!dayCtx) return;
+        const dayOrder2 = ['Senin','Selasa','Rabu','Kamis','Jumat','Sabtu','Minggu'];
+        const dayVals2 = d.day_breakdown || {};
+        const labels2 = dayOrder2.filter(day => dayVals2[day]);
+        const data2 = labels2.map(day => dayVals2[day].avg_interactions);
+        const colors2 = labels2.map(day => day === d.best_posting_day ? '#198754' : '#0d6efd');
+        chartInstances.insights = new Chart(dayCtx.getContext('2d'), {
+            type: 'bar',
+            data: {
+                labels: labels2,
+                datasets: [{
+                    label: 'Rata-rata Interaksi',
+                    data: data2,
+                    backgroundColor: colors2,
+                    borderRadius: 4,
+                }]
+            },
+            options: {
+                responsive: true,
+                plugins: { legend: { display: false } },
+                scales: {
+                    y: { beginAtZero: true, ticks: { font: { size: 9 } } },
+                    x: { ticks: { font: { size: 9 } } }
+                }
+            }
+        });
+    }, 100);
+}
+
+function renderBestTime() {
+    const d = analyticsData.bestTime;
+    if (!d || d.error) {
+        document.getElementById('analyticsContent').innerHTML = '<div class="text-center py-3 text-muted small">Data tidak tersedia</div>';
+        return;
+    }
+
+    const days = d.day_names || ['Senin','Selasa','Rabu','Kamis','Jumat','Sabtu','Minggu'];
+    const heatmap = d.heatmap || [];
+
+    let tableHtml = '<table class="table table-sm table-bordered mb-0" style="font-size:10px"><thead><tr><th style="min-width:60px">Hari</th>';
+    for (let h = 0; h < 24; h++) {
+        tableHtml += `<th class="text-center ${h >= 6 && h <= 18 ? 'text-primary' : ''}" style="min-width:22px;padding:2px">${String(h).padStart(2,'0')}</th>`;
+    }
+    tableHtml += '</tr></thead><tbody>';
+
+    let maxVal = 0;
+    heatmap.forEach(row => {
+        row.hours.forEach(cell => {
+            if (cell.avg_interactions > maxVal) maxVal = cell.avg_interactions;
+        });
+    });
+    maxVal = Math.max(maxVal, 1);
+
+    heatmap.forEach((row, di) => {
+        tableHtml += `<tr><td class="fw-semibold small" style="padding:2px 4px">${row.day}</td>`;
+        row.hours.forEach(cell => {
+            const ratio = cell.avg_interactions / maxVal;
+            const r = Math.round(240 - ratio * 215);
+            const g = Math.round(240 - ratio * 215);
+            const b = 253;
+            const bg = cell.avg_interactions > 0 ? `rgb(${r},${g},${b})` : '#f8f9fa';
+            const highlight = cell.avg_interactions > 0 && ratio >= 0.8 ? 'border:2px solid #0d6efd' : '';
+            tableHtml += `<td class="text-center" style="padding:3px 1px;background:${bg};${highlight};cursor:pointer" title="${row.day} ${String(cell.hour).padStart(2,'0')}:00 — ${cell.avg_interactions} rata-rata interaksi (${cell.count} post)">
+                ${cell.count > 0 ? `<small>${cell.avg_interactions > 0 ? Math.round(cell.avg_interactions) : ''}</small>` : ''}
+            </td>`;
+        });
+        tableHtml += '</tr>';
+    });
+    tableHtml += '</tbody></table>';
+
+    document.getElementById('analyticsContent').innerHTML = `
+    <div class="row g-2">
+        <div class="col-md-8">
+            <h6 class="mb-1">Heatmap Waktu Posting Terbaik</h6>
+            <small class="text-muted d-block mb-2">Rata-rata interaksi per hari dan jam (klik sel untuk detail)</small>
+            <div style="overflow-x:auto">${tableHtml}</div>
+        </div>
+        <div class="col-md-4">
+            ${d.best_time ? `
+            <div class="p-3 bg-success bg-opacity-10 rounded text-center mb-2">
+                <small class="text-muted">Waktu Posting Terbaik</small>
+                <div class="fw-bold fs-5">${d.best_time.day}</div>
+                <div class="fw-bold fs-4 text-success">${String(d.best_time.hour).padStart(2, '0')}:00</div>
+                <small class="text-muted">Rata-rata ${d.best_time.avg_interactions} interaksi</small>
+            </div>` : ''}
+            <h6 class="mb-1">Rekomendasi</h6>
+            <div class="p-2 bg-light rounded small">
+                ${d.best_time ? `
+                <p class="mb-1"><strong>Posting terbaik:</strong> Hari ${d.best_time.day} pukul ${String(d.best_time.hour).padStart(2,'0')}:00</p>
+                <p class="mb-0 text-muted">Posting di jam ini untuk engagement maksimal.</p>
+                ` : '<p class="mb-0 text-muted">Belum cukup data untuk rekomendasi.</p>'}
+            </div>
+        </div>
+    </div>`;
+}
+
+function renderWordCloud() {
+    const d = analyticsData.wordcloud;
+    if (!d || d.error || !d.length) {
+        document.getElementById('analyticsContent').innerHTML = '<div class="text-center py-3 text-muted small">Data tidak tersedia</div>';
+        return;
+    }
+
+    document.getElementById('analyticsContent').innerHTML = `
+    <div class="row g-2">
+        <div class="col-md-8">
+            <h6 class="mb-1">Word Cloud Caption & Komentar</h6>
+            <div id="wordcloudContainer" style="width:100%;height:400px;position:relative"></div>
+        </div>
+        <div class="col-md-4">
+            <h6 class="mb-1">Kata Terpopuler</h6>
+            <div style="max-height:400px;overflow-y:auto" id="wordcloudList"></div>
+        </div>
+    </div>`;
+
+    const listEl = document.getElementById('wordcloudList');
+    listEl.innerHTML = d.slice(0, 30).map(w =>
+        `<div class="d-flex justify-content-between small py-1 border-bottom"><span>${escapeHtml(w.word)}</span><span class="fw-bold text-primary">${w.count}x</span></div>`
+    ).join('');
+
+    const weightSum = d.reduce((s, w) => s + w.count, 0);
+    const words = d.map(w => [w.word, (w.count / weightSum) * 100]);
+
+    try {
+        WordCloud(document.getElementById('wordcloudContainer'), {
+            list: words,
+            gridSize: 8,
+            weightFactor: 2.5,
+            fontFamily: 'sans-serif',
+            color: 'random-dark',
+            rotateRatio: 0.3,
+            backgroundColor: '#f8f9fa',
+            minSize: 10,
+            shape: 'circle',
+        });
+    } catch(e) {
+        console.error('Wordcloud error:', e);
+    }
+}
+
+function renderCategories() {
+    const d = analyticsData.categories;
+    if (!d || d.error) {
+        document.getElementById('analyticsContent').innerHTML = '<div class="text-center py-3 text-muted small">Data tidak tersedia</div>';
+        return;
+    }
+
+    const catLabels = {
+        produk: 'Produk', promo: 'Promo', edukasi: 'Edukasi',
+        lifestyle: 'Lifestyle', inspirasi: 'Inspirasi',
+        behind_scene: 'Behind Scene', uncategorized: 'Lainnya',
+    };
+    const catColors = {
+        produk: '#0d6efd', promo: '#dc3545', edukasi: '#198754',
+        lifestyle: '#fd7e14', inspirasi: '#6f42c1',
+        behind_scene: '#20c997', uncategorized: '#6c757d',
+    };
+
+    const perf = d.category_performance || {};
+    let perfHtml = '';
+    const sortedCats = Object.entries(perf).sort((a, b) => b[1].avg_interactions - a[1].avg_interactions);
+    const maxCatInt = Math.max(...sortedCats.map(([,v]) => v.avg_interactions), 1);
+    sortedCats.forEach(([cat, v]) => {
+        const pct = (v.avg_interactions / maxCatInt * 100).toFixed(0);
+        const color = catColors[cat] || '#6c757d';
+        const label = catLabels[cat] || cat;
+        perfHtml += `<div class="mb-1"><span class="badge" style="background:${color}">${label}</span> <small class="text-muted">${v.count} post</small><div class="progress" style="height:18px"><div class="progress-bar" style="width:${pct}%;background:${color}">${v.avg_interactions} int.</div></div></div>`;
+    });
+
+    const dist = d.category_distribution || {};
+    const totalCats = Object.values(dist).reduce((a, b) => a + b, 0);
+
+    document.getElementById('analyticsContent').innerHTML = `
+    <div class="row g-2">
+        <div class="col-md-6">
+            <h6 class="mb-1">Distribusi Kategori Konten</h6>
+            <canvas id="chartCategories" height="220"></canvas>
+        </div>
+        <div class="col-md-6">
+            <h6 class="mb-1">Performa per Kategori</h6>
+            <small class="text-muted d-block mb-1">Terbaik: <strong>${catLabels[d.best_category] || d.best_category || '-'}</strong></small>
+            ${perfHtml || '<small class="text-muted">Tidak ada data</small>'}
+            <hr class="my-1">
+            <div class="d-flex flex-wrap gap-1">
+                ${Object.entries(dist).map(([cat, count]) => {
+                    const label = catLabels[cat] || cat;
+                    const color = catColors[cat] || '#6c757d';
+                    const pct = totalCats ? (count / totalCats * 100).toFixed(1) : 0;
+                    return `<span class="badge" style="background:${color}">${label}: ${count} (${pct}%)</span>`;
+                }).join('')}
+            </div>
+        </div>
+    </div>`;
+
+    setTimeout(() => {
+        const ctx = document.getElementById('chartCategories');
+        if (!ctx) return;
+        const cctx = ctx.getContext('2d');
+        chartInstances.categories = new Chart(cctx, {
+            type: 'doughnut',
+            data: {
+                labels: Object.keys(dist).map(k => catLabels[k] || k),
+                datasets: [{
+                    data: Object.values(dist),
+                    backgroundColor: Object.keys(dist).map(k => catColors[k] || '#6c757d'),
+                }]
+            },
+            options: {
+                responsive: true,
+                plugins: {
+                    legend: { position: 'bottom', labels: { boxWidth: 12, padding: 8, font: { size: 10 } } }
+                }
+            }
+        });
+    }, 100);
 }
 
 async function startScrap() {

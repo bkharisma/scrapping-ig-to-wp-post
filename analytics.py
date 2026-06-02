@@ -1,7 +1,7 @@
 import re
 import logging
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timezone
 from statistics import mean, stdev
 
 logger = logging.getLogger(__name__)
@@ -319,4 +319,197 @@ def analyze_target_market(posts: list[dict], followers_count: int) -> dict:
         "top_hashtags": top_hashtags,
         "caption_length_insight": caption_insight,
         "engagement_consistency": consistency,
+    }
+
+
+STOPWORDS = {
+    "dan", "di", "ke", "dari", "yang", "ini", "itu", "dengan", "untuk",
+    "pada", "adalah", "akan", "telah", "sudah", "bisa", "dapat", "tidak",
+    "juga", "saya", "kami", "kita", "mereka", "dia", "anda", "kau",
+    "aku", "kamu", "nya", "the", "and", "of", "to", "in", "is", "it",
+    "you", "that", "was", "for", "are", "with", "this", "have", "from",
+    "atau", "serta", "tetapi", "namun", "ada", "saat", "setelah",
+    "sebagai", "oleh", "seperti", "lebih", "semua", "jika", "saya",
+    "bisa", "ingin", "akan", "telah", "sudah", "tersebut", "sebuah",
+}
+
+CONTENT_CATEGORIES = {
+    "produk": {
+        "keywords": ["produk", "product", "beli", "order", "shop", "tersedia",
+                      "ready stock", "pre-order", "best seller", "kualitas",
+                      "original", "baru", "tersedia", "stok"],
+    },
+    "promo": {
+        "keywords": ["diskon", "discount", "sale", "promo", "gratis", "free",
+                      "giveaway", "give away", "hadiah", "prize", "kompetisi",
+                      "competition", "flash sale", "bundling", "bonus",
+                      "cashback", "voucher", "coupon", "promotion"],
+    },
+    "edukasi": {
+        "keywords": ["tips", "tutorial", "cara", "how to", "panduan", "guide",
+                      "belajar", "learn", "edukasi", "education", "info",
+                      "informasi", "knowledge", "pengetahuan", "triks",
+                      "rahasia", "secret", "wawasan", "step by step",
+                      "langkah", "cara mudah"],
+    },
+    "lifestyle": {
+        "keywords": ["daily", "life", "sehari-hari", "lifestyle", "routine",
+                      "rutinitas", "hari ini", "today", "activity",
+                      "aktivitas", "momen", "moment", "vibes", "vibe",
+                      "ootd", "outfit", "style", "fashion"],
+    },
+    "inspirasi": {
+        "keywords": ["inspirasi", "inspiration", "motivasi", "motivation",
+                      "semangat", "quotes", "quote", "kata kata",
+                      "kutipan", "sabar", "syukur", "bersyukur",
+                      "positive", "positif", "mindset", "growth"],
+    },
+    "behind_scene": {
+        "keywords": ["behind the scene", "bts", "proses", "process",
+                      "making", "dibalik layar", "behind the scenes",
+                      "pembuatan", "workshop", "shooting"],
+    },
+}
+
+_compiled_categories = None
+
+
+def _get_categories():
+    global _compiled_categories
+    if _compiled_categories is not None:
+        return _compiled_categories
+    _compiled_categories = {}
+    for cat_name, cat_data in CONTENT_CATEGORIES.items():
+        _compiled_categories[cat_name] = [
+            re.compile(re.escape(kw), re.IGNORECASE) for kw in cat_data["keywords"]
+        ]
+    return _compiled_categories
+
+
+def classify_content(caption: str) -> str:
+    if not caption:
+        return "uncategorized"
+    categories = _get_categories()
+    scores = {}
+    for cat_name, patterns in categories.items():
+        score = sum(1 for p in patterns if p.search(caption))
+        if score > 0:
+            scores[cat_name] = score
+    if not scores:
+        return "uncategorized"
+    return max(scores, key=scores.get)
+
+
+def analyze_content_categories(posts: list[dict]) -> dict:
+    if not posts:
+        return {"error": "No posts"}
+
+    category_counts: dict[str, int] = {}
+    category_engagement: dict[str, list[float]] = {}
+
+    for p in posts:
+        caption = p.get("caption") or ""
+        cat = classify_content(caption)
+        category_counts[cat] = category_counts.get(cat, 0) + 1
+        interactions = p.get("like_count", 0) + p.get("comments_count", 0)
+        category_engagement.setdefault(cat, []).append(interactions)
+
+    cat_avg = {}
+    for cat, vals in category_engagement.items():
+        cat_avg[cat] = {
+            "count": len(vals),
+            "avg_interactions": round(mean(vals), 1) if vals else 0,
+            "total_interactions": sum(vals),
+        }
+
+    best_category = max(cat_avg, key=lambda c: cat_avg[c]["avg_interactions"]) if cat_avg else None
+
+    return {
+        "category_distribution": category_counts,
+        "category_performance": cat_avg,
+        "best_category": best_category,
+        "total_posts": len(posts),
+    }
+
+
+def extract_word_frequencies(posts: list[dict], max_words: int = 100) -> list[dict]:
+    word_counts: dict[str, int] = Counter()
+    for p in posts:
+        caption = p.get("caption") or ""
+        text = re.sub(r"https?://\S+", "", caption)
+        text = re.sub(r"[#@]\w+", "", text)
+        text = re.sub(r"[^\w\s]", " ", text)
+        words = text.lower().split()
+        for w in words:
+            w = w.strip()
+            if len(w) > 2 and w not in STOPWORDS:
+                word_counts[w] += 1
+
+        for c in p.get("comments", []):
+            comment_text = c.get("text", "")
+            text2 = re.sub(r"https?://\S+", "", comment_text)
+            text2 = re.sub(r"[#@]\w+", "", text2)
+            text2 = re.sub(r"[^\w\s]", " ", text2)
+            words2 = text2.lower().split()
+            for w in words2:
+                w = w.strip()
+                if len(w) > 2 and w not in STOPWORDS:
+                    word_counts[w] += 1
+
+    most_common = word_counts.most_common(max_words)
+    return [{"word": w, "count": c, "size": c} for w, c in most_common]
+
+
+def analyze_best_time_to_post(posts: list[dict]) -> dict:
+    if not posts:
+        return {"error": "No posts"}
+
+    day_names = ["Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu", "Minggu"]
+    heatmap: dict[str, dict[int, list[int]]] = {}
+    for day in day_names:
+        heatmap[day] = {h: [] for h in range(24)}
+
+    for p in posts:
+        ts = p.get("timestamp", "")
+        if not ts:
+            continue
+        try:
+            dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            day_name = day_names[dt.weekday()]
+            hour = dt.hour
+            interactions = p.get("like_count", 0) + p.get("comments_count", 0)
+            heatmap[day_name][hour].append(interactions)
+        except (ValueError, TypeError):
+            pass
+
+    matrix = []
+    for day in day_names:
+        row = []
+        for h in range(24):
+            vals = heatmap[day][h]
+            avg = round(mean(vals), 1) if vals else 0
+            count = len(vals)
+            row.append({"hour": h, "avg_interactions": avg, "count": count})
+        matrix.append({"day": day, "hours": row})
+
+    all_hour_day = []
+    for day in day_names:
+        for h in range(24):
+            vals = heatmap[day][h]
+            if vals:
+                all_hour_day.append((day, h, mean(vals)))
+
+    best_time = None
+    if all_hour_day:
+        best = max(all_hour_day, key=lambda x: x[2])
+        best_time = {
+            "day": best[0],
+            "hour": best[1],
+            "avg_interactions": round(best[2], 1),
+        }
+
+    return {
+        "heatmap": matrix,
+        "best_time": best_time,
+        "day_names": day_names,
     }

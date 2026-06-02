@@ -17,7 +17,7 @@ from config import ACCESS_TOKEN, IG_USER_ID, FETCH_COMMENTS, COMMENTS_LIMIT, WP_
 from scrapper import InstagramScrapper
 from downloader import download_media_organized
 from exporter import export_captions_csv
-from analytics import analyze_engagement, analyze_sentiment, analyze_target_market, get_post_sentiment, POSITIVE_WORDS, NEGATIVE_WORDS
+from analytics import analyze_engagement, analyze_sentiment, analyze_target_market, get_post_sentiment, POSITIVE_WORDS, NEGATIVE_WORDS, analyze_best_time_to_post, extract_word_frequencies, analyze_content_categories
 
 logging.basicConfig(
     level=logging.INFO,
@@ -431,6 +431,37 @@ def session_insights(session_id):
         followers = 0
 
     result = analyze_target_market(posts, followers)
+    return jsonify(result)
+
+
+@app.route("/api/sessions/<session_id>/analytics/best-time")
+def session_best_time(session_id):
+    meta_path = CRAWLS_DIR / session_id / "metadata.json"
+    if not meta_path.exists():
+        return jsonify({"error": "Session not found"}), 404
+    posts = json.loads(meta_path.read_text(encoding="utf-8"))
+    result = analyze_best_time_to_post(posts)
+    return jsonify(result)
+
+
+@app.route("/api/sessions/<session_id>/analytics/wordcloud")
+def session_wordcloud(session_id):
+    meta_path = CRAWLS_DIR / session_id / "metadata.json"
+    if not meta_path.exists():
+        return jsonify({"error": "Session not found"}), 404
+    posts = json.loads(meta_path.read_text(encoding="utf-8"))
+    max_words = request.args.get("max", 80, type=int)
+    result = extract_word_frequencies(posts, max_words)
+    return jsonify(result)
+
+
+@app.route("/api/sessions/<session_id>/analytics/content-categories")
+def session_content_categories(session_id):
+    meta_path = CRAWLS_DIR / session_id / "metadata.json"
+    if not meta_path.exists():
+        return jsonify({"error": "Session not found"}), 404
+    posts = json.loads(meta_path.read_text(encoding="utf-8"))
+    result = analyze_content_categories(posts)
     return jsonify(result)
 
 

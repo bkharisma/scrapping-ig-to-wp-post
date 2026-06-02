@@ -34,6 +34,15 @@ Aplikasi untuk mengambil foto, video, dan caption dari Instagram Business/Creato
 - **Download ZIP** — unduh semua media dalam satu file ZIP
 - **Navigasi keyboard** — ArrowLeft/ArrowRight untuk carousel, Escape untuk tutup modal
 
+### Analitik Dashboard (`analytics.py`)
+
+- **Engagement Analysis** — rata-rata engagement rate, total interaksi, breakdown per tipe media, tren bulanan (Chart.js line chart), top 5 post
+- **Sentiment Analysis** — distribusi sentimen (positif/netral/negatif) berbasis dictionary Indonesia-Inggris, dengan doughnut chart dan daftar post paling positif/negatif
+- **Market Insights** — performa per hari (bar chart), performa tipe konten, top hashtag, analisis panjang caption vs interaksi, konsistensi engagement (coefficient of variation)
+- **Best Time to Post** — heatmap interaktif (hari × jam) dengan gradasi warna, menampilkan waktu posting dengan rata-rata interaksi tertinggi
+- **Word Cloud** — visualisasi kata yang paling sering muncul dari caption dan komentar, dilengkapi daftar 30 kata terpopuler
+- **Content Classification** — klasifikasi otomatis post ke 6 kategori (Produk, Promo, Edukasi, Lifestyle, Inspirasi, Behind Scene) berdasarkan keyword caption, dengan doughnut chart distribusi dan performa per kategori
+
 ### CLI (`main.py`)
 
 - Jalankan crawling langsung dari terminal
@@ -49,7 +58,8 @@ Aplikasi untuk mengambil foto, video, dan caption dari Instagram Business/Creato
 craw-ig/
 ├── app.py              # Flask web application (backend + API)
 ├── main.py             # CLI entry point
-├── crawler.py          # Instagram Graph API crawler
+├── analytics.py        # Analitik: engagement, sentimen, best time, word cloud, klasifikasi konten
+├── scrapper.py         # Instagram Graph API crawler
 ├── downloader.py       # Media downloader (CLI & web mode)
 ├── exporter.py         # CSV exporter
 ├── config.py           # Konfigurasi dari environment variables
@@ -146,8 +156,9 @@ Buka browser ke **http://localhost:5000**
 2. **Pantau Progress** — progress bar akan menampilkan status secara real-time
 3. **Lihat Hasil** — setelah selesai, dashboard otomatis menampilkan post dari sesi tersebut
 4. **Jelajahi Post** — klik baris tabel untuk melihat detail media dan caption lengkap
-5. **Unduh Data** — gunakan tombol CSV untuk caption atau ZIP untuk semua media
-6. **Riwayat Sesi** — panel kiri menampilkan daftar sesi crawl sebelumnya
+5. **Analitik** — klik tab **Engagement**, **Sentimen**, **Pasar**, **Waktu**, **Word Cloud**, atau **Kategori** untuk melihat analisis data sesi
+6. **Unduh Data** — gunakan tombol CSV untuk caption atau ZIP untuk semua media
+7. **Riwayat Sesi** — panel kiri menampilkan daftar sesi crawl sebelumnya
 
 ### Mode 2: CLI
 
@@ -234,12 +245,20 @@ Semua endpoint di bawah digunakan oleh dashboard frontend:
 | Method | Endpoint | Keterangan |
 |--------|----------|------------|
 | `GET` | `/` | Halaman dashboard |
-| `POST` | `/api/crawl` | Mulai crawl baru. Body: `{date_from, date_to, media_types}` |
-| `GET` | `/api/crawl/status?key=...` | Polling status crawl (dipanggil setiap 1 detik) |
+| `POST` | `/api/scrap` | Mulai crawl baru. Body: `{date_from, date_to, media_types, fetch_comments}` |
+| `GET` | `/api/scrap/status?key=...` | Polling status crawl (dipanggil setiap 1 detik) |
 | `GET` | `/api/sessions` | Daftar semua sesi crawl |
 | `GET` | `/api/sessions/<id>/posts` | Daftar post (paginasi, search, sort) |
 | `GET` | `/api/sessions/<id>/posts/<post_id>` | Detail satu post |
+| `DELETE` | `/api/sessions/<id>` | Hapus sesi beserta semua data dan media |
 | `GET` | `/api/sessions/<id>/stats` | Statistik sesi |
+| `GET` | `/api/sessions/<id>/analytics/engagement` | Analisis engagement rate, tren, breakdown tipe media |
+| `GET` | `/api/sessions/<id>/analytics/sentiment` | Analisis sentimen (positif/netral/negatif) |
+| `GET` | `/api/sessions/<id>/analytics/insights` | Insight pasar: hari terbaik, hashtag, panjang caption |
+| `GET` | `/api/sessions/<id>/analytics/best-time` | Heatmap waktu posting terbaik (hari × jam) |
+| `GET` | `/api/sessions/<id>/analytics/wordcloud?max=80` | Frekuensi kata dari caption & komentar |
+| `GET` | `/api/sessions/<id>/analytics/content-categories` | Klasifikasi konten per kategori |
+| `POST` | `/api/sessions/<id>/post-to-wp` | Post sesi/selected post ke WordPress |
 | `GET` | `/api/sessions/<id>/csv` | Download caption CSV |
 | `GET` | `/api/sessions/<id>/images` | Download semua media (ZIP) |
 | `GET` | `/api/media/<id>/<filepath>` | Sajikan file media individual |
@@ -247,6 +266,8 @@ Semua endpoint di bawah digunakan oleh dashboard frontend:
 | `GET` | `/api/wp/test` | Test koneksi WordPress |
 | `POST` | `/api/config/token` | Update ACCESS_TOKEN di `.env` |
 | `GET` | `/api/config/ig-test` | Test validitas ACCESS_TOKEN |
+| `GET` | `/api/config/account` | Info akun Instagram terautentikasi |
+| `GET` | `/api/config/sentiment-words` | Daftar kata positif/negatif untuk sentimen |
 
 ### Query Parameters `/api/sessions/<id>/posts`
 
@@ -291,6 +312,22 @@ Fitur:
 ### `exporter.py` — CSV Exporter
 
 Fungsi `export_captions_csv()` mengekspor metadata post ke file CSV dengan kolom: id, date, caption, type, likes, comments, permalink.
+
+### `analytics.py` — Analitik & Insight
+
+Modul analisis data post Instagram. Seluruh fungsi menerima `list[dict]` (posts) dan mengembalikan `dict` hasil analisis:
+
+| Fungsi | Output |
+|--------|--------|
+| `analyze_engagement()` | Engagement rate, total interaksi, breakdown tipe media, tren bulanan, top 5 post |
+| `analyze_sentiment()` | Distribusi sentimen (positif/netral/negatif), skor, per-post detail |
+| `analyze_target_market()` | Hari terbaik posting, performa tipe konten, top hashtag, analisis caption, konsistensi |
+| `analyze_best_time_to_post()` | Heatmap 7×24 (hari × jam), waktu posting dengan interaksi tertinggi |
+| `extract_word_frequencies()` | Word frequency dari caption + komentar (filter stopwords) |
+| `classify_content()` | Klasifikasi caption ke 6 kategori berdasarkan keyword |
+| `analyze_content_categories()` | Distribusi & performa per kategori konten |
+
+Sentimen menggunakan dictionary positif/negatif bilingual (Indonesia-Inggris) yang didefinisikan sebagai `POSITIVE_WORDS` dan `NEGATIVE_WORDS`.
 
 ### `config.py` — Konfigurasi
 
@@ -396,6 +433,8 @@ Log di `/var/log/craw-ig/` dirotasi otomatis setiap hari dan disimpan 14 hari.
 | API | Instagram Graph API v21.0 |
 | Frontend | HTML, CSS, JavaScript (vanilla) |
 | UI Framework | Bootstrap 5.3.3, Bootstrap Icons 1.11.3 |
+| Chart Library | Chart.js 4.4.7 |
+| Word Cloud | wordcloud2.js 1.1.0 |
 | HTTP Client | Requests |
 | Environment | python-dotenv |
 | Progress Bar | tqdm (CLI mode) |
