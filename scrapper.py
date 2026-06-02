@@ -106,6 +106,17 @@ class InstagramScrapper:
             for c in raw
         ]
 
+    def get_account_insights(self, metric: str = "follower_count",
+                            period: str = "day", since: str = "",
+                            until: str = "") -> dict:
+        url = f"{GRAPH_API_BASE}/{self.user_id}/insights"
+        params = {"metric": metric, "period": period}
+        if since:
+            params["since"] = since
+        if until:
+            params["until"] = until
+        return self._request(url, params)
+
     def get_account_info(self) -> dict[str, Any]:
         url = f"{GRAPH_API_BASE}/{self.user_id}"
         params = {"fields": "id,username,name,profile_picture_url,biography,followers_count,media_count"}

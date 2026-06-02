@@ -85,7 +85,9 @@ def download_media_organized(posts: list[dict], media_dir: Path, progress_callba
     for idx, post in enumerate(posts):
         date_str = ""
         if post.get("timestamp"):
-            date_str = post["timestamp"][:10]
+            parts = post["timestamp"][:10].split("-")
+            if len(parts) == 3:
+                date_str = f"{parts[2]}{parts[1]}{parts[0]}"
         if post.get("media_type") in ("IMAGE", "VIDEO") and post.get("media_url"):
             all_items.append((idx, post["id"], post["media_type"], post.get("media_url"), date_str))
         elif post.get("media_type") == "CAROUSEL_ALBUM" and post.get("children", {}).get("data"):

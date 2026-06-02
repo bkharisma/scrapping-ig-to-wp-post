@@ -267,6 +267,7 @@ const TAB_ENDPOINTS = {
     bestTime: 'best-time',
     wordcloud: 'wordcloud?max=80',
     categories: 'content-categories',
+    followers: 'followers-trend',
 };
 
 async function loadAnalyticsTab(tab) {
@@ -318,6 +319,7 @@ function switchAnalyticsTab(tab) {
         engagement: 'tabEngagement', sentiment: 'tabSentiment',
         insights: 'tabInsights', bestTime: 'tabBestTime',
         wordcloud: 'tabWordCloud', categories: 'tabCategories',
+        followers: 'tabFollowers',
     };
     document.getElementById(btnMap[tab]).classList.add('active');
 
@@ -333,6 +335,7 @@ function switchAnalyticsTab(tab) {
     else if (tab === 'bestTime') renderBestTime();
     else if (tab === 'wordcloud') renderWordCloud();
     else if (tab === 'categories') renderCategories();
+    else if (tab === 'followers') renderFollowers();
 }
 
 function destroyAllCharts() {
@@ -413,21 +416,50 @@ function renderEngagement() {
             ${topHtml || '<small class="text-muted">Tidak ada data</small>'}
         </div>
         <div class="col-md-5">
-            <h6 class="mb-1">Tren ${hasFollowers ? 'Engagement Rate' : 'Interaksi'} Bulanan</h6>
+            <div class="d-flex justify-content-between align-items-center mb-1">
+                <h6 class="mb-0">Tren ${hasFollowers ? 'Engagement Rate' : 'Interaksi'}</h6>
+                <div class="btn-group btn-group-sm" role="group">
+                    <button class="btn btn-outline-secondary" id="btnTrendDaily" onclick="switchTrendPeriod('daily')">Harian</button>
+                    <button class="btn btn-outline-secondary" id="btnTrendWeekly" onclick="switchTrendPeriod('weekly')">Mingguan</button>
+                    <button class="btn btn-outline-secondary active" id="btnTrendMonthly" onclick="switchTrendPeriod('monthly')">Bulanan</button>
+                </div>
+            </div>
             <canvas id="chartEngagementTrend" height="200"></canvas>
         </div>
     </div>`;
 
-    const months = Object.keys(d.monthly_trend || {});
-    const values = Object.values(d.monthly_trend || {});
-    if (months.length) {
+    window._trendData = {
+        daily: d.daily_trend || {},
+        weekly: d.weekly_trend || {},
+        monthly: d.monthly_trend || {},
+    };
+    window._trendHasFollowers = hasFollowers;
+    window._trendCurrentPeriod = 'monthly';
+
+    window.switchTrendPeriod = function (period) {
+        if (period === window._trendCurrentPeriod) return;
+        window._trendCurrentPeriod = period;
+        document.querySelectorAll('#analyticsContent .btn-group-sm .btn').forEach(b => b.classList.remove('active'));
+        document.getElementById('btnTrend' + period.charAt(0).toUpperCase() + period.slice(1)).classList.add('active');
+        renderTrendChart(period);
+    };
+
+    function renderTrendChart(period) {
+        const data = window._trendData[period];
+        const labels = Object.keys(data);
+        if (!labels.length) return;
+        const values = Object.values(data);
+        if (chartInstances.engagement) {
+            chartInstances.engagement.destroy();
+            chartInstances.engagement = null;
+        }
         const ctx = document.getElementById('chartEngagementTrend').getContext('2d');
         chartInstances.engagement = new Chart(ctx, {
             type: 'line',
             data: {
-                labels: months,
+                labels: labels,
                 datasets: [{
-                    label: hasFollowers ? 'Engagement Rate (%)' : 'Rata-rata Interaksi',
+                    label: window._trendHasFollowers ? 'Engagement Rate (%)' : 'Rata-rata Interaksi',
                     data: values,
                     borderColor: '#0d6efd',
                     backgroundColor: 'rgba(13,110,253,0.1)',
@@ -440,11 +472,13 @@ function renderEngagement() {
                 responsive: true,
                 plugins: { legend: { display: false } },
                 scales: {
-                    y: { beginAtZero: true, ticks: { callback: v => hasFollowers ? v + '%' : v } }
+                    y: { beginAtZero: true, ticks: { callback: v => window._trendHasFollowers ? v + '%' : v } }
                 }
             }
         });
     }
+
+    renderTrendChart('monthly');
 }
 
 function renderSentiment() {
@@ -818,6 +852,152 @@ function renderCategories() {
             }
         });
     }, 100);
+}
+
+function renderFollowers() {
+    const d = analyticsData.followers;
+    if (!d || d.error) {
+        document.getElementById('analyticsContent').innerHTML = '<div class="text-center py-3 text-muted small">' + escapeHtml(d?.error || 'Data tidak tersedia') + '</div>';
+        return;
+    }
+
+    const totalChangeClass = d.total_change >= 0 ? 'text-success' : 'text-danger';
+    const totalChangePrefix = d.total_change >= 0 ? '+' : '';
+    const avgClass = d.avg_daily_change >= 0 ? 'text-success' : 'text-danger';
+    const avgPrefix = d.avg_daily_change >= 0 ? '+' : '';
+
+    document.getElementById('analyticsContent').innerHTML = `
+    <div class="row g-2">
+        <div class="col-12">
+            <div class="row g-2 mb-2">
+                <div class="col-4">
+                    <div class="p-2 bg-light rounded text-center">
+                        <div class="fw-bold fs-5">${(d.current_followers || 0).toLocaleString()}</div>
+                        <small class="text-muted">Current Followers</small>
+                    </div>
+                </div>
+                <div class="col-4">
+                    <div class="p-2 bg-light rounded text-center">
+                        <div class="fw-bold fs-5 ${totalChangeClass}">${totalChangePrefix}${(d.total_change || 0).toLocaleString()}</div>
+                        <small class="text-muted">30-Day Change</small>
+                    </div>
+                </div>
+                <div class="col-4">
+                    <div class="p-2 bg-light rounded text-center">
+                        <div class="fw-bold fs-5 ${avgClass}">${avgPrefix}${(d.avg_daily_change || 0).toLocaleString()}</div>
+                        <small class="text-muted">Avg Daily Change</small>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-7">
+            <div class="d-flex justify-content-between align-items-center mb-1">
+                <h6 class="mb-0">Followers Trend</h6>
+                <div class="btn-group btn-group-sm" role="group" id="followersPeriodGroup">
+                    <input type="radio" class="btn-check" name="followersPeriod" id="frDaily" value="daily" checked>
+                    <label class="btn btn-outline-secondary" for="frDaily">Daily</label>
+                    <input type="radio" class="btn-check" name="followersPeriod" id="frWeekly" value="weekly">
+                    <label class="btn btn-outline-secondary" for="frWeekly">Weekly</label>
+                    <input type="radio" class="btn-check" name="followersPeriod" id="frMonthly" value="monthly">
+                    <label class="btn btn-outline-secondary" for="frMonthly">Monthly</label>
+                </div>
+            </div>
+            <canvas id="chartFollowersTrend" height="220"></canvas>
+        </div>
+        <div class="col-md-5">
+            <h6 class="mb-1">Recent Daily Changes</h6>
+            <div style="max-height:240px;overflow-y:auto" id="followersTable"></div>
+        </div>
+    </div>`;
+
+    const daily = d.daily || [];
+    const weekly = d.weekly || [];
+    const monthly = d.monthly || [];
+
+    function renderFTable(data) {
+        const table = document.getElementById('followersTable');
+        if (!table) return;
+        let html = '<table class="table table-sm table-borderless small mb-0"><tbody>';
+        for (const entry of data) {
+            let label = entry.date || entry.week || entry.month;
+            if (entry.week && entry.week.includes('-W')) {
+                const [year, week] = entry.week.split('-W');
+                label = `W${week}-${year}`;
+            }
+            const followers = entry.followers || entry.avg_followers || 0;
+            const change = entry.change || 0;
+            const cls = change > 0 ? 'text-success' : (change < 0 ? 'text-danger' : 'text-muted');
+            const prefix = change > 0 ? '+' : '';
+            html += `<tr><td>${label}</td><td class="text-end fw-semibold">${followers.toLocaleString()}</td><td class="text-end ${cls}">${prefix}${change.toLocaleString()}</td></tr>`;
+        }
+        html += '</tbody></table>';
+        table.innerHTML = html;
+    }
+
+    function renderFChart(period) {
+        if (chartInstances.followers) {
+            chartInstances.followers.destroy();
+            chartInstances.followers = null;
+        }
+
+        let dataArr, labelKey, valueKey;
+        if (period === 'daily') {
+            dataArr = daily;
+            labelKey = 'date';
+            valueKey = 'followers';
+        } else if (period === 'weekly') {
+            dataArr = weekly;
+            labelKey = 'week';
+            valueKey = 'avg_followers';
+        } else {
+            dataArr = monthly;
+            labelKey = 'month';
+            valueKey = 'avg_followers';
+        }
+
+        const labels = dataArr.map(e => e[labelKey]);
+        const values = dataArr.map(e => e[valueKey]);
+        if (!labels.length) return;
+
+        renderFTable(dataArr);
+
+        const ctx = document.getElementById('chartFollowersTrend');
+        if (!ctx) return;
+        chartInstances.followers = new Chart(ctx.getContext('2d'), {
+            type: 'line',
+            data: {
+                labels: labels,
+                datasets: [{
+                    label: 'Followers',
+                    data: values,
+                    borderColor: '#0d6efd',
+                    backgroundColor: 'rgba(13,110,253,0.1)',
+                    fill: true,
+                    tension: 0.3,
+                    pointBackgroundColor: '#0d6efd',
+                    pointRadius: 3,
+                }]
+            },
+            options: {
+                responsive: true,
+                plugins: { legend: { display: false } },
+                scales: {
+                    y: {
+                        beginAtZero: false,
+                        ticks: { callback: v => v.toLocaleString() }
+                    }
+                }
+            }
+        });
+    }
+
+    renderFChart('daily');
+
+    document.querySelectorAll('#followersPeriodGroup .btn-check').forEach(radio => {
+        radio.addEventListener('change', function () {
+            if (this.checked) renderFChart(this.value);
+        });
+    });
 }
 
 async function startScrap() {
@@ -1302,8 +1482,7 @@ function formatDate(ts) {
     const d = ts.substring(0, 10);
     const parts = d.split('-');
     if (parts.length !== 3) return d;
-    const months = ['Jan','Feb','Mar','Apr','Mei','Jun','Jul','Agu','Sep','Okt','Nov','Des'];
-    return `${parts[2]} ${months[parseInt(parts[1]) - 1] || parts[1]} ${parts[0]}`;
+    return `${parts[2]}-${parts[1]}-${parts[0]}`;
 }
 
 function escapeHtml(str) {

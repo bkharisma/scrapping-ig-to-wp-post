@@ -24,6 +24,7 @@ from analytics import (
     get_post_sentiment, get_sentiment_words, add_sentiment_word,
     remove_sentiment_word, analyze_best_time_to_post,
     extract_word_frequencies, analyze_content_categories,
+    analyze_followers_trend,
 )
 
 logging.basicConfig(
@@ -95,12 +96,18 @@ def save_session_index(index: list[dict]):
 
 def update_session_index(session_id: str, posts: list[dict],
                          date_from: str, date_to: str, media_types: list[str]):
-    dates = [p["timestamp"][:10] for p in posts if p.get("timestamp")]
+    dates = []
+    for p in posts:
+        ts = p.get("timestamp", "")
+        if ts:
+            parts = ts[:10].split("-")
+            if len(parts) == 3:
+                dates.append(f"{parts[2]}-{parts[1]}-{parts[0]}")
     total_media = sum(len(p.get("_media_files", [])) for p in posts)
 
     entry = {
         "session_id": session_id,
-        "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "date": datetime.now().strftime("%d-%m-%Y %H:%M:%S"),
         "total_posts": len(posts),
         "total_media": total_media,
         "filter_date_from": date_from or "",
@@ -518,7 +525,9 @@ def get_session_stats(session_id):
             top_post = p
 
         if p.get("timestamp"):
-            dates.append(p["timestamp"][:10])
+            parts = p["timestamp"][:10].split("-")
+            if len(parts) == 3:
+                dates.append(f"{parts[2]}-{parts[1]}-{parts[0]}")
 
     return jsonify({
         "total_posts": total,
@@ -632,6 +641,24 @@ def session_content_categories(session_id):
         return jsonify({"error": MISSING_MSG}), 404
     result = analyze_content_categories(posts)
     _set_cached_analytics(session_id, "content-categories", result)
+    return jsonify(result)
+
+
+@app.route("/api/sessions/<session_id>/analytics/followers-trend")
+def session_followers_trend(session_id):
+    cached = _get_cached_analytics(session_id, "followers-trend")
+    if cached is not None:
+        return jsonify(cached)
+
+    try:
+        scraper = _get_scraper()
+        insights = scraper.get_account_insights("follower_count", "day")
+        result = analyze_followers_trend(insights)
+    except Exception as e:
+        logger.warning(f"Followers trend gagal: {e}")
+        return jsonify({"error": f"Gagal ambil data insights: {e}"}), 500
+
+    _set_cached_analytics(session_id, "followers-trend", result)
     return jsonify(result)
 
 

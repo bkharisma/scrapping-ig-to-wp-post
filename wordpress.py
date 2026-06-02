@@ -124,7 +124,11 @@ class WordPressClient:
         if first_line:
             return first_line[:60] + ("..." if len(first_line) > 60 else "")
         ts = post.get("timestamp", "")
-        date_str = ts[:10] if ts else "Unknown"
+        date_str = ""
+        if ts:
+            parts = ts[:10].split("-")
+            if len(parts) == 3:
+                date_str = f"{parts[2]}-{parts[1]}-{parts[0]}"
         return f"[Instagram] {date_str}"
 
     @staticmethod

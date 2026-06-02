@@ -163,6 +163,8 @@ def analyze_engagement(posts: list[dict], followers_count: int) -> dict:
 
     has_followers = followers_count and followers_count > 0
     per_post = []
+    daily: dict[str, list[float]] = {}
+    weekly: dict[str, list[float]] = {}
     monthly: dict[str, list[float]] = {}
     by_type: dict[str, list[float]] = {}
 
@@ -192,10 +194,23 @@ def analyze_engagement(posts: list[dict], followers_count: int) -> dict:
         ts = p.get("timestamp", "")
         if ts:
             month_key = ts[:7]
+            daily_key = ts[:10]
             if has_followers:
                 monthly.setdefault(month_key, []).append(er)
+                daily.setdefault(daily_key, []).append(er)
             else:
                 monthly.setdefault(month_key, []).append(interactions)
+                daily.setdefault(daily_key, []).append(interactions)
+            try:
+                dt = datetime.fromisoformat(ts)
+                iso_year, iso_week, _ = dt.isocalendar()
+                week_key = f"{iso_year}-W{iso_week:02d}"
+                if has_followers:
+                    weekly.setdefault(week_key, []).append(er)
+                else:
+                    weekly.setdefault(week_key, []).append(interactions)
+            except (ValueError, TypeError):
+                pass
 
     if has_followers:
         avg_er = round(mean([e["engagement_rate"] for e in per_post]), 3)
@@ -213,9 +228,20 @@ def analyze_engagement(posts: list[dict], followers_count: int) -> dict:
             "count": len(rates),
         }
 
+    daily_trend = {}
+    for d, rates in sorted(daily.items()):
+        display_d = f"{d[8:10]}-{d[5:7]}-{d[:4]}"
+        daily_trend[display_d] = round(mean(rates), 3) if has_followers else round(mean(rates), 1)
+
+    weekly_trend = {}
+    for w, rates in sorted(weekly.items()):
+        display_w = w if "-W" not in w else f"W{w.split('-W')[1]}-{w.split('-W')[0]}"
+        weekly_trend[display_w] = round(mean(rates), 3) if has_followers else round(mean(rates), 1)
+
     monthly_trend = {}
     for m, rates in sorted(monthly.items()):
-        monthly_trend[m] = round(mean(rates), 3) if has_followers else round(mean(rates), 1)
+        display_m = f"{m[5:7]}-{m[:4]}"
+        monthly_trend[display_m] = round(mean(rates), 3) if has_followers else round(mean(rates), 1)
 
     return {
         "average_engagement_rate": avg_er,
@@ -224,6 +250,8 @@ def analyze_engagement(posts: list[dict], followers_count: int) -> dict:
         "has_followers_data": has_followers,
         "top_5_posts": top_5,
         "by_media_type": type_summary,
+        "daily_trend": daily_trend,
+        "weekly_trend": weekly_trend,
         "monthly_trend": monthly_trend,
         "per_post": per_post,
     }
@@ -582,4 +610,81 @@ def analyze_best_time_to_post(posts: list[dict]) -> dict:
         "heatmap": matrix,
         "best_time": best_time,
         "day_names": day_names,
+    }
+
+
+def analyze_followers_trend(insights_data: dict) -> dict:
+    if not insights_data:
+        return {"error": "No insights data"}
+
+    raw_data = insights_data.get("data", [])
+    if not raw_data:
+        return {"error": "Empty insights response"}
+
+    metric = raw_data[0]
+    values = metric.get("values", [])
+    if not values:
+        return {"error": "No values in insights data"}
+
+    parsed = []
+    for v in values:
+        val = v.get("value")
+        end_time = v.get("end_time", "")
+        if val is None or not end_time:
+            continue
+        try:
+            dt = datetime.fromisoformat(end_time.replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            continue
+        parsed.append({"date": dt.strftime("%d-%m-%Y"), "followers": val})
+
+    if not parsed:
+        return {"error": "Failed to parse insights values"}
+
+    parsed.sort(key=lambda x: x["date"])
+
+    for i, entry in enumerate(parsed):
+        prev = parsed[i - 1]["followers"] if i > 0 else entry["followers"]
+        entry["change"] = entry["followers"] - prev
+
+    current = parsed[-1]["followers"]
+    oldest = parsed[0]["followers"]
+    total_change = current - oldest
+    avg_daily_change = round(total_change / (len(parsed) - 1), 1) if len(parsed) > 1 else 0
+
+    weekly: dict[str, list[int]] = {}
+    monthly: dict[str, list[int]] = {}
+    for entry in parsed:
+        dt = datetime.strptime(entry["date"], "%d-%m-%Y")
+        iso_year, iso_week, _ = dt.isocalendar()
+        week_key = f"{iso_year}-W{iso_week:02d}"
+        month_key = dt.strftime("%Y-%m")
+        weekly.setdefault(week_key, []).append(entry["followers"])
+        monthly.setdefault(month_key, []).append(entry["followers"])
+
+    weekly_agg = []
+    for wk, vals in sorted(weekly.items()):
+        weekly_agg.append({
+            "week": wk,
+            "avg_followers": round(mean(vals)),
+            "change": vals[-1] - vals[0],
+        })
+
+    monthly_agg = []
+    for mn, vals in sorted(monthly.items()):
+        display_mn = f"{mn[5:7]}-{mn[:4]}"
+        monthly_agg.append({
+            "month": display_mn,
+            "avg_followers": round(mean(vals)),
+            "change": vals[-1] - vals[0],
+        })
+
+    return {
+        "current_followers": current,
+        "total_change": total_change,
+        "avg_daily_change": avg_daily_change,
+        "data_points": len(parsed),
+        "daily": parsed,
+        "weekly": weekly_agg,
+        "monthly": monthly_agg,
     }
