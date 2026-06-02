@@ -37,7 +37,9 @@ class InstagramScrapper:
             "children{media_type,media_url,thumbnail_url}"
         )
 
-    def fetch_all_media(self, date_from: str = "", date_to: str = "") -> list[dict]:
+    def fetch_all_media(self, date_from: str = "", date_to: str = "",
+                        fetch_comments: bool = False, comments_limit: int = 25,
+                        progress_callback=None) -> list[dict]:
         if not self.user_id:
             raise ValueError("IG_USER_ID belum diisi di .env")
         if not ACCESS_TOKEN:
@@ -73,7 +75,33 @@ class InstagramScrapper:
             time.sleep(REQUEST_DELAY)
 
         logger.info(f"Total post dalam periode: {len(all_posts)}")
+
+        if fetch_comments and all_posts:
+            logger.info(f"Mengambil komentar untuk {len(all_posts)} post...")
+            for idx, post in enumerate(all_posts, 1):
+                try:
+                    comments = self.fetch_comments(post["id"], comments_limit)
+                    post["_comments"] = comments
+                except Exception as e:
+                    logger.warning(f"Gagal ambil komentar post {post['id']}: {e}")
+                    post["_comments"] = []
+                if progress_callback:
+                    progress_callback(idx, len(all_posts),
+                                      f"Komentar: {idx}/{len(all_posts)}")
+                time.sleep(REQUEST_DELAY)
+
         return all_posts
+
+    def fetch_comments(self, media_id: str, limit: int = 25) -> list[dict]:
+        url = f"{GRAPH_API_BASE}/{media_id}/comments"
+        params = {"fields": "text,timestamp,username", "limit": limit}
+        data = self._request(url, params)
+        raw = data.get("data", [])
+        return [
+            {"text": c.get("text", ""), "timestamp": c.get("timestamp", ""),
+             "username": c.get("username", "")}
+            for c in raw
+        ]
 
     def get_account_info(self) -> dict[str, Any]:
         url = f"{GRAPH_API_BASE}/{self.user_id}"

@@ -108,6 +108,40 @@ def analyze_engagement(posts: list[dict], followers_count: int) -> dict:
     }
 
 
+def _comments_text(comments: list[dict]) -> str:
+    if not comments:
+        return ""
+    return " ".join(c.get("text", "") for c in comments if c.get("text"))
+
+
+def get_post_sentiment(caption: str, comments: list | None = None) -> dict:
+    text = caption or ""
+    if comments:
+        text += " " + _comments_text(comments)
+    cleaned = _clean_caption(text)
+    words = set(cleaned.split())
+
+    pos_count = sum(1 for w in words if w in POSITIVE_WORDS)
+    neg_count = sum(1 for w in words if w in NEGATIVE_WORDS)
+
+    for phrase in POSITIVE_WORDS:
+        if " " in phrase and phrase in cleaned:
+            pos_count += 1
+    for phrase in NEGATIVE_WORDS:
+        if " " in phrase and phrase in cleaned:
+            neg_count += 1
+
+    net = pos_count - neg_count
+    if net > 0:
+        label = "positive"
+    elif net < 0:
+        label = "negative"
+    else:
+        label = "neutral"
+
+    return {"sentiment": label, "score": net, "positive_words": pos_count, "negative_words": neg_count}
+
+
 def analyze_sentiment(posts: list[dict]) -> dict:
     if not posts:
         return {"error": "No posts"}
@@ -117,7 +151,11 @@ def analyze_sentiment(posts: list[dict]) -> dict:
 
     for p in posts:
         caption = p.get("caption") or ""
-        cleaned = _clean_caption(caption)
+        comments = p.get("comments", [])
+        text = caption
+        if comments:
+            text += " " + _comments_text(comments)
+        cleaned = _clean_caption(text)
         words = set(cleaned.split())
 
         pos_count = sum(1 for w in words if w in POSITIVE_WORDS)
@@ -149,6 +187,7 @@ def analyze_sentiment(posts: list[dict]) -> dict:
             "negative_words": neg_count,
             "score": net,
             "sentiment": label,
+            "comments_count": len(comments),
         })
 
     positive_posts = [r for r in results if r["sentiment"] == "positive"]

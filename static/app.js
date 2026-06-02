@@ -56,7 +56,7 @@ async function deleteSession(sessionId) {
             document.getElementById('activeSessionLabel').textContent = 'Pilih sesi scrap';
             document.getElementById('postCount').textContent = '0';
             document.getElementById('postsBody').innerHTML =
-                '<tr><td colspan="8" class="text-center py-5 text-muted">Pilih sesi di sebelah kiri</td></tr>';
+                '<tr><td colspan="9" class="text-center py-5 text-muted">Pilih sesi di sebelah kiri</td></tr>';
             document.getElementById('pagination').innerHTML = '';
             document.getElementById('paginationInfo').textContent = '0 hasil';
             document.getElementById('statsCard').classList.add('d-none');
@@ -124,7 +124,7 @@ async function loadPosts() {
 function renderPosts(posts) {
     const tbody = document.getElementById('postsBody');
     if (!posts.length) {
-        tbody.innerHTML = '<tr><td colspan="8" class="text-center py-5 text-muted">Tidak ada hasil</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="9" class="text-center py-5 text-muted">Tidak ada hasil</td></tr>';
         return;
     }
 
@@ -144,7 +144,7 @@ function renderPosts(posts) {
         return `
         <tr>
             <td class="text-center"><input type="checkbox" class="post-checkbox" value="${p.id}" onchange="updateSelectedCount()"></td>
-            <td class="text-muted small" style="cursor:pointer" onclick="openPostDetail('${p.id}')">${offset + i + 1}</td>
+            <td class="small text-center fw-bold" style="cursor:pointer" onclick="openPostDetail('${p.id}')">${p.rank || '-'}</td>
             <td style="cursor:pointer" onclick="openPostDetail('${p.id}')">
                 ${hasMedia ? `
                 <div class="media-thumb-video">
@@ -158,6 +158,11 @@ function renderPosts(posts) {
             <td class="small" style="cursor:pointer" onclick="openPostDetail('${p.id}')">${formatDate(p.timestamp)}</td>
             <td style="cursor:pointer" onclick="openPostDetail('${p.id}')"><div class="caption-cell small">${escapeHtml((p.caption || '').substring(0, 150))}</div></td>
             <td style="cursor:pointer" onclick="openPostDetail('${p.id}')"><span class="badge ${typeBadgeClass} type-badge">${p.media_type === 'CAROUSEL_ALBUM' ? 'ALBUM' : p.media_type}</span></td>
+            <td class="small text-center" style="cursor:pointer" onclick="openPostDetail('${p.id}')">
+                ${p.sentiment === 'positive' ? '<span class="badge bg-success">Positif</span>' :
+                  p.sentiment === 'negative' ? '<span class="badge bg-danger">Negatif</span>' :
+                  '<span class="badge bg-secondary">Netral</span>'}
+            </td>
             <td class="small text-center" style="cursor:pointer" onclick="openPostDetail('${p.id}')">${p.like_count || 0}</td>
             <td class="small text-center" style="cursor:pointer" onclick="openPostDetail('${p.id}')">${p.comments_count || 0}</td>
         </tr>`;
@@ -483,6 +488,7 @@ async function startScrap() {
     if (document.getElementById('typeImage').checked) media_types.push('IMAGE');
     if (document.getElementById('typeVideo').checked) media_types.push('VIDEO');
     if (document.getElementById('typeCarousel').checked) media_types.push('CAROUSEL_ALBUM');
+    const fetch_comments = document.getElementById('fetchComments').checked;
 
     // Reset modal
     bar.style.width = '0%';
@@ -503,7 +509,7 @@ async function startScrap() {
         const res = await fetch('/api/scrap', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ date_from, date_to, media_types }),
+            body: JSON.stringify({ date_from, date_to, media_types, fetch_comments }),
         });
         const data = await res.json();
 
@@ -655,6 +661,33 @@ function showPostModal(post) {
 
     currentPost._mediaItems = mediaItems;
     renderModalMedia(currentMediaIndex = 0);
+
+    // Render comments
+    const section = document.getElementById('modalCommentsSection');
+    const list = document.getElementById('modalCommentsList');
+    const comments = post.comments || [];
+    if (comments.length > 0) {
+        list.innerHTML = comments.map(c => {
+            const text = c.text || '';
+            const username = c.username || '';
+            const sent = getPostSentiment(text);
+            const badge = sent.sentiment === 'positive' ? 'bg-success' :
+                          sent.sentiment === 'negative' ? 'bg-danger' : 'bg-secondary';
+            const label = sent.sentiment === 'positive' ? 'Positif' :
+                          sent.sentiment === 'negative' ? 'Negatif' : 'Netral';
+            return `
+            <div class="mb-2 p-2 bg-light rounded">
+                <div class="d-flex justify-content-between">
+                    <strong class="small">${escapeHtml(username)}</strong>
+                    <span class="badge ${badge}">${label}</span>
+                </div>
+                <div class="small mt-1">${escapeHtml(text)}</div>
+            </div>`;
+        }).join('');
+        section.classList.remove('d-none');
+    } else {
+        section.classList.add('d-none');
+    }
 
     const modal = new bootstrap.Modal(document.getElementById('postModal'));
     modal.show();
@@ -936,7 +969,65 @@ function escapeHtml(str) {
 
 function showError(msg) {
     document.getElementById('postsBody').innerHTML =
-        `<tr><td colspan="8" class="text-center py-5 text-danger">${escapeHtml(msg)}</td></tr>`;
+        `<tr><td colspan="9" class="text-center py-5 text-danger">${escapeHtml(msg)}</td></tr>`;
+}
+
+const POSITIVE_WORDS = new Set([
+    "baik","bagus","hebat","keren","mantap","sukses","indah","cantik",
+    "menarik","nyaman","senang","bahagia","puas","bangga","lucu",
+    "imut","gemas","bersyukur","terima kasih","makasih","love","suka",
+    "sempurna","istimewa","luar biasa","recommended","rekomendasi",
+    "wow","amazing","beautiful","great","awesome","fantastic",
+    "terbaik","terkeren","terindah","terlucu","kreatif","inovatif",
+    "menginspirasi","inspiratif","motivasi","semangat","keren abis",
+    "cakep","kece","sip","top","nice","good","perfect",
+    "inspiring","wonderful","excellent","brilliant","stunning",
+    "murah","hemat","untung","berkah","sehat","segar","cerah",
+]);
+
+const NEGATIVE_WORDS = new Set([
+    "buruk","jelek","parah","payah","mengerikan","menyedihkan",
+    "kecewa","gagal","rugi","susah","sulit","sedih","marah",
+    "benci","muak","jijik","bosan","membosankan","capek","lelah",
+    "gak enak","ga enak","nggak enak","tidak enak","sampah",
+    "mengecewakan","menjijikkan","horor","mengerikan","ngeri",
+    "jahat","kejam","kasar","buruk banget","jelek banget",
+    "worst","bad","terrible","awful","hate","ugly","boring",
+    "horrible","disappointed","disappointing","fail","failed",
+    "sakit","pusing","stress","frustrasi","kalut","kacau",
+    "mahal","boros","menyesal","nyesel","zonk","gagal total",
+    "tidak suka","ga suka","gak suka","nggak suka","ga mood",
+    "berantakan","amburadul","sembarangan","asalan",
+]);
+
+function getPostSentiment(text) {
+    let cleaned = (text || '').toLowerCase()
+        .replace(/[#@]\w+/g, '')
+        .replace(/https?:\/\/\S+/g, '')
+        .trim();
+    const words = new Set(cleaned.split(/\s+/));
+
+    let pos_count = 0;
+    let neg_count = 0;
+
+    words.forEach(w => {
+        if (POSITIVE_WORDS.has(w)) pos_count++;
+        if (NEGATIVE_WORDS.has(w)) neg_count++;
+    });
+
+    POSITIVE_WORDS.forEach(phrase => {
+        if (phrase.includes(' ') && cleaned.includes(phrase)) pos_count++;
+    });
+    NEGATIVE_WORDS.forEach(phrase => {
+        if (phrase.includes(' ') && cleaned.includes(phrase)) neg_count++;
+    });
+
+    const net = pos_count - neg_count;
+    let label = 'neutral';
+    if (net > 0) label = 'positive';
+    else if (net < 0) label = 'negative';
+
+    return { sentiment: label, score: net };
 }
 
 // --- Event Listeners ---
@@ -953,14 +1044,66 @@ document.addEventListener('keydown', (e) => {
     }
 });
 
+// --- Sentiment Words ---
+async function openSentimentWordsModal() {
+    const container = document.getElementById('sentimentWordsContent');
+    container.innerHTML = '<div class="text-center py-4 text-muted small">Memuat...</div>';
+    const modal = new bootstrap.Modal(document.getElementById('sentimentWordsModal'));
+    modal.show();
+
+    try {
+        const res = await fetch('/api/config/sentiment-words');
+        const data = await res.json();
+
+        if (data.error) {
+            container.innerHTML = `<div class="text-danger text-center py-3">${escapeHtml(data.error)}</div>`;
+            return;
+        }
+
+        function renderBadges(words, label, badgeClass) {
+            if (!words.length) return '<small class="text-muted">Tidak ada kata</small>';
+            return words.map(w => `<span class="badge ${badgeClass} me-1 mb-1">${escapeHtml(w)}</span>`).join('');
+        }
+
+        container.innerHTML = `
+            <div class="col-md-6">
+                <div class="card h-100">
+                    <div class="card-header py-1 bg-success text-white">
+                        <i class="bi bi-emoji-smile"></i> Positif (${data.positive.length})
+                    </div>
+                    <div class="card-body small" style="max-height:300px;overflow-y:auto">
+                        ${renderBadges(data.positive, 'Positif', 'bg-success')}
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-6">
+                <div class="card h-100">
+                    <div class="card-header py-1 bg-danger text-white">
+                        <i class="bi bi-emoji-frown"></i> Negatif (${data.negative.length})
+                    </div>
+                    <div class="card-body small" style="max-height:300px;overflow-y:auto">
+                        ${renderBadges(data.negative, 'Negatif', 'bg-danger')}
+                    </div>
+                </div>
+            </div>
+        `;
+    } catch (e) {
+        container.innerHTML = `<div class="text-danger text-center py-3">Error: ${escapeHtml(e.message)}</div>`;
+    }
+}
+
 // --- Settings / Token ---
 async function openSettingsModal() {
     document.getElementById('tokenStatus').innerHTML = '';
     document.getElementById('btnUpdateToken').disabled = false;
     document.getElementById('btnUpdateToken').innerHTML = '<i class="bi bi-check-circle"></i> Update & Test';
+    document.getElementById('tokenInput').value = '';
 
     const infoEl = document.getElementById('settingsAccountInfo');
     infoEl.innerHTML = '<em class="text-muted">Memuat info akun...</em>';
+
+    const modal = new bootstrap.Modal(document.getElementById('settingsModal'));
+    modal.show();
 
     try {
         const res = await fetch('/api/config/account');
@@ -983,12 +1126,6 @@ async function openSettingsModal() {
     } catch (e) {
         infoEl.innerHTML = `<span class="text-danger">Gagal memuat info akun</span>`;
     }
-
-    // Load current token from .env — we show placeholder
-    document.getElementById('tokenInput').value = '';
-
-    const modal = new bootstrap.Modal(document.getElementById('settingsModal'));
-    modal.show();
 }
 
 async function updateToken() {

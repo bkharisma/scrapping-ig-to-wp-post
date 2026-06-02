@@ -14,6 +14,9 @@ GRAPH_API_BASE = "https://graph.facebook.com/v21.0"
 REQUEST_DELAY = 0.5
 MAX_RETRIES = 3
 
+FETCH_COMMENTS = os.getenv("FETCH_COMMENTS", "false").lower() == "true"
+COMMENTS_LIMIT = int(os.getenv("COMMENTS_LIMIT", "25"))
+
 WP_ENABLED = os.getenv("WP_ENABLED", "false").lower() == "true"
 WP_URL = os.getenv("WP_URL", "").rstrip("/")
 WP_USER = os.getenv("WP_USER", "")

@@ -63,6 +63,10 @@
                             </div>
                         </div>
                     </div>
+                    <div class="form-check mb-2">
+                        <input class="form-check-input" type="checkbox" id="fetchComments">
+                        <label class="form-check-label small">Ambil Komentar</label>
+                    </div>
                     <button class="btn btn-primary w-100" id="btnScrap" onclick="startScrap()">
                         <i class="bi bi-cloud-arrow-down"></i> Mulai Scrap
                     </button>
@@ -96,6 +100,9 @@
                         <button type="button" class="btn btn-outline-primary" id="tabSentiment" onclick="switchAnalyticsTab('sentiment')">Sentimen</button>
                         <button type="button" class="btn btn-outline-primary" id="tabInsights" onclick="switchAnalyticsTab('insights')">Insight Pasar</button>
                     </div>
+                    <button class="btn btn-sm btn-outline-info" onclick="openSentimentWordsModal()" title="Daftar kata sentimen">
+                        <i class="bi bi-chat-dots"></i> Kata
+                    </button>
                 </div>
                 <div class="card-body py-2" id="analyticsContent">
                     <div class="text-center py-4 text-muted small">Memuat analitik...</div>
@@ -112,6 +119,8 @@
                     <div class="d-flex gap-2 align-items-center flex-wrap">
                         <input type="text" class="form-control form-control-sm" placeholder="Cari caption..." id="searchInput" style="width:180px">
                         <select class="form-select form-select-sm" id="sortSelect" style="width:130px">
+                            <option value="rank_desc">Peringkat &uarr;</option>
+                            <option value="rank_asc">Peringkat &darr;</option>
                             <option value="timestamp_desc">Terbaru</option>
                             <option value="timestamp_asc">Terlama</option>
                             <option value="likes_desc">Like &uarr;</option>
@@ -138,17 +147,18 @@
                         <thead>
                             <tr>
                                 <th style="width:36px"><input type="checkbox" id="selectAll" onchange="toggleSelectAll(this)" title="Select all"></th>
-                                <th style="width:36px">#</th>
+                                <th style="width:36px" title="Peringkat by interaksi">#</th>
                                 <th style="width:72px">Media</th>
                                 <th style="width:100px">Tanggal</th>
                                 <th>Caption</th>
                                 <th style="width:70px">Tipe</th>
+                                <th style="width:60px">Sentimen</th>
                                 <th style="width:50px">&#9829;</th>
                                 <th style="width:50px">&#9993;</th>
                             </tr>
                         </thead>
                         <tbody id="postsBody">
-                            <tr><td colspan="8" class="text-center py-5 text-muted">Pilih sesi di sebelah kiri</td></tr>
+                            <tr><td colspan="9" class="text-center py-5 text-muted">Pilih sesi di sebelah kiri</td></tr>
                         </tbody>
                     </table>
                 </div>
@@ -196,6 +206,11 @@
                             <hr class="my-2">
                             <p class="small mb-0" id="modalCaption" style="white-space:pre-wrap"></p>
                             <div class="mt-2" id="modalChildren"></div>
+                            <div class="mt-2 d-none" id="modalCommentsSection">
+                                <hr class="my-2">
+                                <h6 class="mb-1"><i class="bi bi-chat"></i> Komentar</h6>
+                                <div id="modalCommentsList" class="small"></div>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -227,6 +242,27 @@
                 <button class="btn btn-sm btn-secondary" id="btnScrapClose" disabled onclick="closeScrapModal()">
                     Tutup
                 </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Sentiment Words Modal -->
+<div class="modal fade" id="sentimentWordsModal" tabindex="-1">
+    <div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header py-2">
+                <h6 class="modal-title"><i class="bi bi-chat-dots"></i> Daftar Kata Sentimen</h6>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="row g-3" id="sentimentWordsContent">
+                    <div class="text-center py-4 text-muted small">Memuat...</div>
+                </div>
+            </div>
+            <div class="modal-footer py-2">
+                <small class="text-muted me-auto">Sumber: <code>analytics.py</code></small>
+                <button type="button" class="btn btn-sm btn-secondary" data-bs-dismiss="modal">Tutup</button>
             </div>
         </div>
     </div>

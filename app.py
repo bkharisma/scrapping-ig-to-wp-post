@@ -13,11 +13,11 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from config import ACCESS_TOKEN, IG_USER_ID, WP_ENABLED, WP_URL, WP_USER, WP_APP_PASS, WP_POST_STATUS
+from config import ACCESS_TOKEN, IG_USER_ID, FETCH_COMMENTS, COMMENTS_LIMIT, WP_ENABLED, WP_URL, WP_USER, WP_APP_PASS, WP_POST_STATUS
 from scrapper import InstagramScrapper
 from downloader import download_media_organized
 from exporter import export_captions_csv
-from analytics import analyze_engagement, analyze_sentiment, analyze_target_market
+from analytics import analyze_engagement, analyze_sentiment, analyze_target_market, get_post_sentiment, POSITIVE_WORDS, NEGATIVE_WORDS
 
 logging.basicConfig(
     level=logging.INFO,
@@ -63,6 +63,7 @@ def save_metadata(posts: list[dict], path: Path):
             "media_url": p.get("media_url"),
             "thumbnail_url": p.get("thumbnail_url"),
             "media_files": p.get("_media_files", []),
+            "comments": p.get("_comments", []),
             "children": [
                 {
                     "id": c.get("id"),
@@ -99,7 +100,8 @@ def update_session_index(session_id: str, posts: list[dict],
 
 
 def scrap_task(date_from: str, date_to: str, media_types: list[str],
-               progress_key: str):
+               progress_key: str, fetch_comments: bool = False,
+               comments_limit: int = 25):
     session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     def update_prog(**kw):
@@ -124,8 +126,15 @@ def scrap_task(date_from: str, date_to: str, media_types: list[str],
 
         scraper = InstagramScrapper()
 
+        def comments_cb(done, total, msg):
+            update_prog(message=msg)
         update_prog(message="Mengambil data dari Instagram...")
-        posts = scraper.fetch_all_media(date_from, date_to)
+        posts = scraper.fetch_all_media(
+            date_from, date_to,
+            fetch_comments=fetch_comments,
+            comments_limit=comments_limit,
+            progress_callback=comments_cb if fetch_comments else None,
+        )
 
         update_prog(total_fetched=len(posts),
                      message=f"Ditemukan {len(posts)} post dalam periode")
@@ -211,13 +220,16 @@ def start_scrap():
     date_from = data.get("date_from", "")
     date_to = data.get("date_to", "")
     media_types = data.get("media_types", [])
+    fetch_comments = data.get("fetch_comments", False)
 
     if not ACCESS_TOKEN or not IG_USER_ID:
         return jsonify({"error": "ACCESS_TOKEN atau IG_USER_ID belum diisi di .env"}), 400
 
     progress_key = datetime.now().isoformat()
     thread = threading.Thread(
-        target=scrap_task, args=(date_from, date_to, media_types, progress_key),
+        target=scrap_task,
+        args=(date_from, date_to, media_types, progress_key),
+        kwargs={"fetch_comments": fetch_comments, "comments_limit": COMMENTS_LIMIT},
         daemon=True
     )
     thread.start()
@@ -274,6 +286,14 @@ def get_session_posts(session_id):
 
     posts = json.loads(meta_path.read_text(encoding="utf-8"))
 
+    for p in posts:
+        p.update(get_post_sentiment(p.get("caption", ""), p.get("comments", [])))
+
+    ranked = sorted(posts, key=lambda p: p.get("like_count", 0) + p.get("comments_count", 0), reverse=True)
+    rank_map = {p["id"]: i + 1 for i, p in enumerate(ranked)}
+    for p in posts:
+        p["rank"] = rank_map.get(p["id"], 0)
+
     if search:
         sl = search.lower()
         posts = [p for p in posts if sl in (p.get("caption", "") or "").lower()]
@@ -283,6 +303,8 @@ def get_session_posts(session_id):
         posts.sort(key=lambda p: p.get("like_count", 0), reverse=reverse)
     elif sort_by == "comments":
         posts.sort(key=lambda p: p.get("comments_count", 0), reverse=reverse)
+    elif sort_by == "rank":
+        posts.sort(key=lambda p: p.get("like_count", 0) + p.get("comments_count", 0), reverse=reverse)
     else:
         posts.sort(key=lambda p: p.get("timestamp", ""), reverse=reverse)
 
@@ -601,6 +623,14 @@ def get_account_info():
         return jsonify({"ok": True, "account": info})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e), "account": None})
+
+
+@app.route("/api/config/sentiment-words")
+def get_sentiment_words():
+    return jsonify({
+        "positive": sorted(POSITIVE_WORDS),
+        "negative": sorted(NEGATIVE_WORDS),
+    })
 
 
 @app.route("/api/sessions/<session_id>/post-to-wp", methods=["POST"])
