@@ -21,7 +21,10 @@ class InstagramScrapper:
                 resp.raise_for_status()
                 data = resp.json()
                 if "error" in data:
-                    raise Exception(f"API error: {data['error']}")
+                    error_msg = data.get("error", {})
+                    if isinstance(error_msg, dict):
+                        error_msg = error_msg.get("message", str(error_msg))
+                    raise Exception(f"API error: {error_msg}")
                 return data
             except requests.RequestException as e:
                 logger.warning(f"Request failed (attempt {attempt}/{MAX_RETRIES}): {e}")
@@ -65,7 +68,7 @@ class InstagramScrapper:
             ]
             all_posts.extend(filtered)
 
-            logging.debug(
+            logger.debug(
                 f"  -> {len(raw_posts)} post, "
                 f"{len(filtered)} dalam periode"
             )

@@ -1,12 +1,16 @@
 import re
+import json
 import logging
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime
+from pathlib import Path
 from statistics import mean, stdev
 
 logger = logging.getLogger(__name__)
 
-POSITIVE_WORDS = {
+SENTIMENT_WORDS_FILE = Path("data/sentiment_words.json")
+
+_DEFAULT_POSITIVE = {
     "baik", "bagus", "hebat", "keren", "mantap", "sukses", "indah", "cantik",
     "menarik", "nyaman", "senang", "bahagia", "puas", "bangga", "lucu",
     "imut", "gemas", "bersyukur", "terima kasih", "makasih", "love", "suka",
@@ -19,7 +23,7 @@ POSITIVE_WORDS = {
     "murah", "hemat", "untung", "berkah", "sehat", "segar", "cerah",
 }
 
-NEGATIVE_WORDS = {
+_DEFAULT_NEGATIVE = {
     "buruk", "jelek", "parah", "payah", "mengerikan", "menyedihkan",
     "kecewa", "gagal", "rugi", "susah", "sulit", "sedih", "marah",
     "benci", "muak", "jijik", "bosan", "membosankan", "capek", "lelah",
@@ -34,11 +38,71 @@ NEGATIVE_WORDS = {
     "berantakan", "amburadul", "sembarangan", "asalan",
 }
 
+POSITIVE_WORDS = set()
+NEGATIVE_WORDS = set()
 
-def _extract_hashtags(caption: str) -> list[str]:
-    if not caption:
-        return []
-    return re.findall(r"#(\w+)", caption)
+
+def _init_sentiment_words():
+    global POSITIVE_WORDS, NEGATIVE_WORDS
+    if SENTIMENT_WORDS_FILE.exists():
+        try:
+            data = json.loads(SENTIMENT_WORDS_FILE.read_text(encoding="utf-8"))
+            POSITIVE_WORDS = set(data.get("positive", _DEFAULT_POSITIVE))
+            NEGATIVE_WORDS = set(data.get("negative", _DEFAULT_NEGATIVE))
+            return
+        except Exception:
+            logger.warning("Gagal membaca %s, pakai default", SENTIMENT_WORDS_FILE)
+    POSITIVE_WORDS = set(_DEFAULT_POSITIVE)
+    NEGATIVE_WORDS = set(_DEFAULT_NEGATIVE)
+
+
+def _save_sentiment_words():
+    SENTIMENT_WORDS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    SENTIMENT_WORDS_FILE.write_text(
+        json.dumps({
+            "positive": sorted(POSITIVE_WORDS),
+            "negative": sorted(NEGATIVE_WORDS),
+        }, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
+def add_sentiment_word(word: str, category: str) -> bool:
+    word = word.strip().lower()
+    if not word:
+        return False
+    if category == "positive":
+        POSITIVE_WORDS.add(word)
+    elif category == "negative":
+        NEGATIVE_WORDS.add(word)
+    else:
+        return False
+    _save_sentiment_words()
+    return True
+
+
+def remove_sentiment_word(word: str, category: str) -> bool:
+    word = word.strip().lower()
+    if not word:
+        return False
+    if category == "positive":
+        POSITIVE_WORDS.discard(word)
+    elif category == "negative":
+        NEGATIVE_WORDS.discard(word)
+    else:
+        return False
+    _save_sentiment_words()
+    return True
+
+
+def get_sentiment_words() -> dict:
+    return {
+        "positive": sorted(POSITIVE_WORDS),
+        "negative": sorted(NEGATIVE_WORDS),
+    }
+
+
+_init_sentiment_words()
 
 
 def _clean_caption(caption: str) -> str:
@@ -49,75 +113,13 @@ def _clean_caption(caption: str) -> str:
     return text.lower().strip()
 
 
-def analyze_engagement(posts: list[dict], followers_count: int) -> dict:
-    if not posts or not followers_count:
-        return {"error": "No posts or followers_count is 0"}
-
-    per_post = []
-    monthly: dict[str, list[float]] = {}
-    by_type: dict[str, list[float]] = {}
-
-    for p in posts:
-        likes = p.get("like_count", 0)
-        comments = p.get("comments_count", 0)
-        interactions = likes + comments
-        er = round((interactions / followers_count) * 100, 3)
-
-        entry = {
-            "id": p.get("id"),
-            "caption": (p.get("caption") or "")[:80],
-            "media_type": p.get("media_type", "UNKNOWN"),
-            "likes": likes,
-            "comments": comments,
-            "interactions": interactions,
-            "engagement_rate": er,
-        }
-        per_post.append(entry)
-
-        mt = p.get("media_type", "UNKNOWN")
-        by_type.setdefault(mt, []).append(er)
-
-        ts = p.get("timestamp", "")
-        if ts:
-            month_key = ts[:7]
-            monthly.setdefault(month_key, []).append(er)
-
-    avg_er = round(mean([e["engagement_rate"] for e in per_post]), 3)
-    sorted_by_er = sorted(per_post, key=lambda x: x["engagement_rate"], reverse=True)
-    top_5 = sorted_by_er[:5]
-
-    type_summary = {}
-    for t, rates in by_type.items():
-        type_summary[t] = {
-            "avg_engagement_rate": round(mean(rates), 3),
-            "count": len(rates),
-        }
-
-    monthly_trend = {}
-    for m, rates in sorted(monthly.items()):
-        monthly_trend[m] = round(mean(rates), 3)
-
-    return {
-        "average_engagement_rate": avg_er,
-        "total_interactions": sum(e["interactions"] for e in per_post),
-        "followers_count": followers_count,
-        "top_5_posts": top_5,
-        "by_media_type": type_summary,
-        "monthly_trend": monthly_trend,
-        "per_post": per_post,
-    }
-
-
 def _comments_text(comments: list[dict]) -> str:
     if not comments:
         return ""
     return " ".join(c.get("text", "") for c in comments if c.get("text"))
 
 
-def get_post_sentiment(caption: str, comments: list | None = None) -> dict:
-    text = caption or ""
-    if comments:
-        text += " " + _comments_text(comments)
+def _compute_sentiment(text: str) -> dict:
     cleaned = _clean_caption(text)
     words = set(cleaned.split())
 
@@ -142,6 +144,91 @@ def get_post_sentiment(caption: str, comments: list | None = None) -> dict:
     return {"sentiment": label, "score": net, "positive_words": pos_count, "negative_words": neg_count}
 
 
+def get_post_sentiment(caption: str, comments: list | None = None) -> dict:
+    text = caption or ""
+    if comments:
+        text += " " + _comments_text(comments)
+    return _compute_sentiment(text)
+
+
+def _extract_hashtags(caption: str) -> list[str]:
+    if not caption:
+        return []
+    return re.findall(r"#(\w+)", caption)
+
+
+def analyze_engagement(posts: list[dict], followers_count: int) -> dict:
+    if not posts:
+        return {"error": "No posts"}
+
+    has_followers = followers_count and followers_count > 0
+    per_post = []
+    monthly: dict[str, list[float]] = {}
+    by_type: dict[str, list[float]] = {}
+
+    for p in posts:
+        likes = p.get("like_count", 0)
+        comments = p.get("comments_count", 0)
+        interactions = likes + comments
+        er = round((interactions / followers_count) * 100, 3) if has_followers else 0
+
+        entry = {
+            "id": p.get("id"),
+            "caption": (p.get("caption") or "")[:80],
+            "media_type": p.get("media_type", "UNKNOWN"),
+            "likes": likes,
+            "comments": comments,
+            "interactions": interactions,
+            "engagement_rate": er,
+        }
+        per_post.append(entry)
+
+        mt = p.get("media_type", "UNKNOWN")
+        if has_followers:
+            by_type.setdefault(mt, []).append(er)
+        else:
+            by_type.setdefault(mt, []).append(interactions)
+
+        ts = p.get("timestamp", "")
+        if ts:
+            month_key = ts[:7]
+            if has_followers:
+                monthly.setdefault(month_key, []).append(er)
+            else:
+                monthly.setdefault(month_key, []).append(interactions)
+
+    if has_followers:
+        avg_er = round(mean([e["engagement_rate"] for e in per_post]), 3)
+    else:
+        avg_er = round(mean([e["interactions"] for e in per_post]), 1)
+
+    sorted_by_er = sorted(per_post, key=lambda x: x["engagement_rate"] if has_followers else x["interactions"], reverse=True)
+    top_5 = sorted_by_er[:5]
+
+    rate_label = "avg_engagement_rate" if has_followers else "avg_interactions"
+    type_summary = {}
+    for t, rates in by_type.items():
+        type_summary[t] = {
+            rate_label: round(mean(rates), 3) if has_followers else round(mean(rates), 1),
+            "count": len(rates),
+        }
+
+    monthly_trend = {}
+    for m, rates in sorted(monthly.items()):
+        monthly_trend[m] = round(mean(rates), 3) if has_followers else round(mean(rates), 1)
+
+    return {
+        "average_engagement_rate": avg_er,
+        "total_interactions": sum(e["interactions"] for e in per_post),
+        "followers_count": followers_count if has_followers else None,
+        "has_followers_data": has_followers,
+        "top_5_posts": top_5,
+        "by_media_type": type_summary,
+        "monthly_trend": monthly_trend,
+        "per_post": per_post,
+    }
+
+
 def analyze_sentiment(posts: list[dict]) -> dict:
     if not posts:
         return {"error": "No posts"}
@@ -155,29 +242,13 @@ def analyze_sentiment(posts: list[dict]) -> dict:
         text = caption
         if comments:
             text += " " + _comments_text(comments)
-        cleaned = _clean_caption(text)
-        words = set(cleaned.split())
 
-        pos_count = sum(1 for w in words if w in POSITIVE_WORDS)
-        neg_count = sum(1 for w in words if w in NEGATIVE_WORDS)
-
-        for phrase in POSITIVE_WORDS:
-            if " " in phrase and phrase in cleaned:
-                pos_count += 1
-        for phrase in NEGATIVE_WORDS:
-            if " " in phrase and phrase in cleaned:
-                neg_count += 1
-
-        net = pos_count - neg_count
-        if net > 0:
-            label = "positive"
-            distribution["positive"] += 1
-        elif net < 0:
-            label = "negative"
-            distribution["negative"] += 1
-        else:
-            label = "neutral"
-            distribution["neutral"] += 1
+        sentiment = _compute_sentiment(text)
+        pos_count = sentiment["positive_words"]
+        neg_count = sentiment["negative_words"]
+        net = sentiment["score"]
+        label = sentiment["sentiment"]
+        distribution[label] += 1
 
         results.append({
             "id": p.get("id"),
@@ -212,6 +283,7 @@ def analyze_target_market(posts: list[dict], followers_count: int) -> dict:
     if not posts:
         return {"error": "No posts"}
 
+    has_followers = followers_count and followers_count > 0
     day_names = ["Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu", "Minggu"]
     day_engagement: dict[int, list[float]] = {i: [] for i in range(7)}
     type_engagement: dict[str, list[float]] = {}
@@ -222,7 +294,7 @@ def analyze_target_market(posts: list[dict], followers_count: int) -> dict:
         likes = p.get("like_count", 0)
         comments = p.get("comments_count", 0)
         interactions = likes + comments
-        er = ((interactions) / followers_count * 100) if followers_count else 0
+        er = (interactions / followers_count * 100) if has_followers else 0
 
         ts = p.get("timestamp", "")
         if ts:
@@ -233,7 +305,7 @@ def analyze_target_market(posts: list[dict], followers_count: int) -> dict:
                 pass
 
         mt = p.get("media_type", "UNKNOWN")
-        type_engagement.setdefault(mt, []).append(er)
+        type_engagement.setdefault(mt, []).append(er if has_followers else interactions)
 
         caption = p.get("caption") or ""
         hashtags = _extract_hashtags(caption)
@@ -252,12 +324,13 @@ def analyze_target_market(posts: list[dict], followers_count: int) -> dict:
     best_day = max(day_avg, key=lambda d: day_avg[d]["avg_interactions"]) if day_avg else None
 
     type_perf = {}
+    perf_key = "avg_engagement_rate" if has_followers else "avg_interactions"
     for t, rates in type_engagement.items():
         type_perf[t] = {
-            "avg_engagement_rate": round(mean(rates), 3),
+            perf_key: round(mean(rates), 3) if has_followers else round(mean(rates), 1),
             "count": len(rates),
         }
-    best_type = max(type_perf, key=lambda t: type_perf[t]["avg_engagement_rate"]) if type_perf else None
+    best_type = max(type_perf, key=lambda t: type_perf[t][perf_key]) if type_perf else None
 
     hashtag_summary = {}
     for h, vals in hashtag_engagement.items():
@@ -319,6 +392,8 @@ def analyze_target_market(posts: list[dict], followers_count: int) -> dict:
         "top_hashtags": top_hashtags,
         "caption_length_insight": caption_insight,
         "engagement_consistency": consistency,
+        "followers_count": followers_count if has_followers else None,
+        "has_followers_data": has_followers,
     }
 
 
@@ -434,9 +509,9 @@ def analyze_content_categories(posts: list[dict]) -> dict:
 
 def extract_word_frequencies(posts: list[dict], max_words: int = 100) -> list[dict]:
     word_counts: dict[str, int] = Counter()
-    for p in posts:
-        caption = p.get("caption") or ""
-        text = re.sub(r"https?://\S+", "", caption)
+
+    def _count_text(text: str):
+        text = re.sub(r"https?://\S+", "", text)
         text = re.sub(r"[#@]\w+", "", text)
         text = re.sub(r"[^\w\s]", " ", text)
         words = text.lower().split()
@@ -445,16 +520,11 @@ def extract_word_frequencies(posts: list[dict], max_words: int = 100) -> list[di
             if len(w) > 2 and w not in STOPWORDS:
                 word_counts[w] += 1
 
+    for p in posts:
+        caption = p.get("caption") or ""
+        _count_text(caption)
         for c in p.get("comments", []):
-            comment_text = c.get("text", "")
-            text2 = re.sub(r"https?://\S+", "", comment_text)
-            text2 = re.sub(r"[#@]\w+", "", text2)
-            text2 = re.sub(r"[^\w\s]", " ", text2)
-            words2 = text2.lower().split()
-            for w in words2:
-                w = w.strip()
-                if len(w) > 2 and w not in STOPWORDS:
-                    word_counts[w] += 1
+            _count_text(c.get("text", ""))
 
     most_common = word_counts.most_common(max_words)
     return [{"word": w, "count": c, "size": c} for w, c in most_common]

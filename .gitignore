@@ -8,3 +8,5 @@ dist/
 build/
 .DS_Store
 data/crawls/
+data/sentiment_words.json
+node_modules/

@@ -1,23 +1,30 @@
 import json
 import logging
 import threading
-import io
-import zipfile
+import tempfile
 import re
 import shutil
+import time
 from pathlib import Path
 from datetime import datetime
 
 from flask import Flask, render_template, request, jsonify, send_file, send_from_directory
-from dotenv import load_dotenv
 
-load_dotenv()
-
-from config import ACCESS_TOKEN, IG_USER_ID, FETCH_COMMENTS, COMMENTS_LIMIT, WP_ENABLED, WP_URL, WP_USER, WP_APP_PASS, WP_POST_STATUS
+from config import (
+    ACCESS_TOKEN, IG_USER_ID, FETCH_COMMENTS, COMMENTS_LIMIT,
+    WP_ENABLED, WP_URL, WP_USER, WP_APP_PASS, WP_POST_STATUS,
+    API_KEY, METADATA_CACHE_TTL,
+)
 from scrapper import InstagramScrapper
 from downloader import download_media_organized
 from exporter import export_captions_csv
-from analytics import analyze_engagement, analyze_sentiment, analyze_target_market, get_post_sentiment, POSITIVE_WORDS, NEGATIVE_WORDS, analyze_best_time_to_post, extract_word_frequencies, analyze_content_categories
+from utils import save_metadata, validate_date
+from analytics import (
+    analyze_engagement, analyze_sentiment, analyze_target_market,
+    get_post_sentiment, get_sentiment_words, add_sentiment_word,
+    remove_sentiment_word, analyze_best_time_to_post,
+    extract_word_frequencies, analyze_content_categories,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -34,6 +41,43 @@ CRAWLS_DIR.mkdir(parents=True, exist_ok=True)
 
 scrap_progress: dict = {}
 scrap_lock = threading.Lock()
+index_lock = threading.Lock()
+
+_scraper_instance: InstagramScrapper | None = None
+_scraper_lock = threading.Lock()
+
+_metadata_cache: dict[str, tuple[float, list[dict]]] = {}
+_metadata_cache_lock = threading.Lock()
+_metadata_read_lock = threading.Lock()
+
+_analytics_cache: dict[str, tuple[float, dict]] = {}
+_analytics_cache_lock = threading.Lock()
+
+PROGRESS_MAX_AGE = 3600
+
+
+def _get_scraper() -> InstagramScrapper:
+    global _scraper_instance
+    with _scraper_lock:
+        if _scraper_instance is None:
+            _scraper_instance = InstagramScrapper()
+        return _scraper_instance
+
+
+def _invalidate_scraper():
+    global _scraper_instance
+    with _scraper_lock:
+        _scraper_instance = None
+
+
+def _cleanup_old_progress():
+    now = time.time()
+    to_delete = [
+        key for key, val in scrap_progress.items()
+        if val.get("status") in ("done", "error") and now - val.get("_completed_at", now) > PROGRESS_MAX_AGE
+    ]
+    for key in to_delete:
+        del scrap_progress[key]
 
 
 def get_session_index() -> list[dict]:
@@ -47,34 +91,6 @@ def save_session_index(index: list[dict]):
     (CRAWLS_DIR / "index.json").write_text(
         json.dumps(index, indent=2, ensure_ascii=False)
     )
-
-
-def save_metadata(posts: list[dict], path: Path):
-    cleaned = []
-    for p in posts:
-        cleaned.append({
-            "id": p.get("id"),
-            "media_type": p.get("media_type"),
-            "caption": p.get("caption"),
-            "timestamp": p.get("timestamp"),
-            "permalink": p.get("permalink"),
-            "like_count": p.get("like_count", 0),
-            "comments_count": p.get("comments_count", 0),
-            "media_url": p.get("media_url"),
-            "thumbnail_url": p.get("thumbnail_url"),
-            "media_files": p.get("_media_files", []),
-            "comments": p.get("_comments", []),
-            "children": [
-                {
-                    "id": c.get("id"),
-                    "media_type": c.get("media_type"),
-                    "media_url": c.get("media_url"),
-                    "thumbnail_url": c.get("thumbnail_url"),
-                }
-                for c in p.get("children", {}).get("data", [])
-            ] if p.get("children") else [],
-        })
-    path.write_text(json.dumps(cleaned, indent=2, ensure_ascii=False))
 
 
 def update_session_index(session_id: str, posts: list[dict],
@@ -94,9 +110,118 @@ def update_session_index(session_id: str, posts: list[dict],
         "data_to": max(dates) if dates else "",
     }
 
-    index = get_session_index()
-    index.insert(0, entry)
-    save_session_index(index)
+    with index_lock:
+        index = get_session_index()
+        index.insert(0, entry)
+        save_session_index(index)
+
+
+def _load_metadata(session_id: str) -> list[dict]:
+    meta_path = CRAWLS_DIR / session_id / "metadata.json"
+    if not meta_path.exists():
+        return None
+
+    mtime = meta_path.stat().st_mtime
+
+    with _metadata_cache_lock:
+        if session_id in _metadata_cache:
+            cached_mtime, cached_data = _metadata_cache[session_id]
+            if cached_mtime == mtime:
+                return cached_data
+
+    with _metadata_read_lock:
+        with _metadata_cache_lock:
+            if session_id in _metadata_cache:
+                cached_mtime, cached_data = _metadata_cache[session_id]
+                if cached_mtime == mtime:
+                    return cached_data
+
+        posts = json.loads(meta_path.read_text(encoding="utf-8"))
+
+        with _metadata_cache_lock:
+            _metadata_cache[session_id] = (mtime, posts)
+
+        return posts
+
+
+def _invalidate_metadata_cache(session_id: str):
+    with _metadata_cache_lock:
+        _metadata_cache.pop(session_id, None)
+    with _analytics_cache_lock:
+        keys_to_del = [k for k in _analytics_cache if k.startswith(f"{session_id}/")]
+        for k in keys_to_del:
+            del _analytics_cache[k]
+
+
+def _get_cached_analytics(session_id: str, key: str) -> dict | None:
+    cache_key = f"{session_id}/{key}"
+    meta_path = CRAWLS_DIR / session_id / "metadata.json"
+    if not meta_path.exists():
+        return None
+    meta_mtime = meta_path.stat().st_mtime
+    info_path = CRAWLS_DIR / session_id / "session_info.json"
+    info_mtime = info_path.stat().st_mtime if info_path.exists() else 0
+    latest_mtime = max(meta_mtime, info_mtime)
+
+    with _analytics_cache_lock:
+        if cache_key in _analytics_cache:
+            cached_mtime, cached_data = _analytics_cache[cache_key]
+            if cached_mtime >= latest_mtime:
+                return cached_data
+    return None
+
+
+def _set_cached_analytics(session_id: str, key: str, data: dict):
+    if "error" in data:
+        return
+    cache_key = f"{session_id}/{key}"
+    meta_path = CRAWLS_DIR / session_id / "metadata.json"
+    if not meta_path.exists():
+        return
+    meta_mtime = meta_path.stat().st_mtime
+    info_path = CRAWLS_DIR / session_id / "session_info.json"
+    info_mtime = info_path.stat().st_mtime if info_path.exists() else 0
+    latest_mtime = max(meta_mtime, info_mtime)
+    with _analytics_cache_lock:
+        _analytics_cache[cache_key] = (latest_mtime, data)
+
+
+def _save_session_info(session_id: str, account_info: dict):
+    info_path = CRAWLS_DIR / session_id / "session_info.json"
+    info_path.write_text(json.dumps({
+        "followers_count": account_info.get("followers_count", 0),
+        "username": account_info.get("username", ""),
+        "name": account_info.get("name", ""),
+        "saved_at": datetime.now().isoformat(),
+    }, ensure_ascii=False), encoding="utf-8")
+
+
+def _load_session_info(session_id: str) -> dict:
+    info_path = CRAWLS_DIR / session_id / "session_info.json"
+    if info_path.exists():
+        try:
+            return json.loads(info_path.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {}
+
+
+def _get_followers_count(session_id: str) -> tuple[int, str]:
+    cached = _load_session_info(session_id)
+    if cached.get("followers_count"):
+        return cached["followers_count"], "cached"
+
+    try:
+        scraper = _get_scraper()
+        account = scraper.get_account_info()
+        followers = account.get("followers_count", 0)
+        if followers > 0:
+            _save_session_info(session_id, account)
+            return followers, "cached"
+        return 0, "api_returned_zero"
+    except Exception as e:
+        logger.warning(f"Gagal ambil followers count: {e}")
+        return 0, "api_unavailable"
 
 
 def scrap_task(date_from: str, date_to: str, media_types: list[str],
@@ -106,6 +231,7 @@ def scrap_task(date_from: str, date_to: str, media_types: list[str],
 
     def update_prog(**kw):
         with scrap_lock:
+            _cleanup_old_progress()
             scrap_progress[progress_key].update(kw)
 
     def download_cb(done, total, msg):
@@ -124,7 +250,13 @@ def scrap_task(date_from: str, date_to: str, media_types: list[str],
         session_dir = CRAWLS_DIR / session_id
         session_dir.mkdir(parents=True)
 
-        scraper = InstagramScrapper()
+        scraper = _get_scraper()
+
+        try:
+            account = scraper.get_account_info()
+            _save_session_info(session_id, account)
+        except Exception:
+            logger.warning("Gagal ambil info akun saat scrap")
 
         def comments_cb(done, total, msg):
             update_prog(message=msg)
@@ -148,7 +280,7 @@ def scrap_task(date_from: str, date_to: str, media_types: list[str],
             save_metadata(posts, session_dir / "metadata.json")
             export_captions_csv(posts, session_dir / "captions.csv")
             update_session_index(session_id, posts, date_from, date_to, media_types)
-            update_prog(status="done",
+            update_prog(status="done", _completed_at=time.time(),
                          message=f"Selesai! Tidak ada post untuk filter yang dipilih.",
                          session_id=session_id)
             return
@@ -179,7 +311,7 @@ def scrap_task(date_from: str, date_to: str, media_types: list[str],
                 wp_results = wp.post_all(posts, status=WP_POST_STATUS, progress_callback=wp_progress)
                 wp_ok = sum(1 for r in wp_results if r.get("success"))
                 update_prog(
-                    status="done", download_pct=100,
+                    status="done", download_pct=100, _completed_at=time.time(),
                     message=f"Selesai! {len(posts)} post, {total_media} media, WP: {wp_ok}/{len(posts)} draft",
                     session_id=session_id, wp_results=wp_results,
                 )
@@ -189,13 +321,13 @@ def scrap_task(date_from: str, date_to: str, media_types: list[str],
                 wp_error = str(e)
                 wp_results = [{"success": False, "error": wp_error}]
                 update_prog(
-                    status="done", download_pct=100,
+                    status="done", download_pct=100, _completed_at=time.time(),
                     message=f"Selesai! {len(posts)} post, {total_media} media — WP GAGAL: {wp_error}",
                     session_id=session_id, wp_results=wp_results,
                 )
                 return
 
-        update_prog(status="done", download_pct=100,
+        update_prog(status="done", download_pct=100, _completed_at=time.time(),
                      message=f"Selesai! {len(posts)} post, {total_media} file media"
                              + (" (WP tidak aktif)" if not WP_ENABLED else ""),
                      session_id=session_id, wp_results=wp_results)
@@ -206,7 +338,21 @@ def scrap_task(date_from: str, date_to: str, media_types: list[str],
             scrap_progress[progress_key] = {
                 "status": "error", "session_id": session_id,
                 "message": f"Error: {str(e)}",
+                "_completed_at": time.time(),
             }
+
+
+@app.before_request
+def check_api_key():
+    if not API_KEY:
+        return
+    if request.path.startswith("/static"):
+        return
+    if request.path == "/":
+        return
+    key = request.headers.get("X-API-Key", "") or request.args.get("api_key", "")
+    if key != API_KEY:
+        return jsonify({"error": "Unauthorized: API key required"}), 401
 
 
 @app.route("/")
@@ -225,6 +371,9 @@ def start_scrap():
     if not ACCESS_TOKEN or not IG_USER_ID:
         return jsonify({"error": "ACCESS_TOKEN atau IG_USER_ID belum diisi di .env"}), 400
 
+    if not validate_date(date_from) or not validate_date(date_to):
+        return jsonify({"error": "Format tanggal tidak valid (YYYY-MM-DD)"}), 400
+
     progress_key = datetime.now().isoformat()
     thread = threading.Thread(
         target=scrap_task,
@@ -241,6 +390,7 @@ def start_scrap():
 def get_scrap_status():
     progress_key = request.args.get("key", "")
     with scrap_lock:
+        _cleanup_old_progress()
         status = scrap_progress.get(
             progress_key,
             {"status": "idle", "message": "Tidak ada scrap aktif"}
@@ -256,20 +406,29 @@ def list_sessions():
 @app.route("/api/sessions/<session_id>", methods=["DELETE"])
 def delete_session(session_id):
     session_dir = CRAWLS_DIR / session_id
-    if not session_dir.exists():
-        return jsonify({"error": "Session tidak ditemukan"}), 404
+    if not session_dir.resolve().is_relative_to(CRAWLS_DIR.resolve()):
+        return jsonify({"error": "Invalid session"}), 400
 
-    try:
-        shutil.rmtree(session_dir)
+    deleted = False
+    if session_dir.exists():
+        try:
+            shutil.rmtree(session_dir)
+            _invalidate_metadata_cache(session_id)
+            deleted = True
+        except Exception as e:
+            logger.exception(f"Gagal menghapus folder sesi {session_id}")
+            return jsonify({"error": f"Gagal menghapus folder: {str(e)}"}), 500
 
+    with index_lock:
         index = get_session_index()
+        before = len(index)
         index = [e for e in index if e.get("session_id") != session_id]
+        if len(index) == before and not deleted:
+            return jsonify({"error": "Session tidak ditemukan"}), 404
         save_session_index(index)
 
-        return jsonify({"ok": True, "message": f"Sesi {session_id} berhasil dihapus"})
-    except Exception as e:
-        logger.exception(f"Gagal menghapus sesi {session_id}")
-        return jsonify({"error": f"Gagal menghapus sesi: {str(e)}"}), 500
+    msg = "Sesi berhasil dihapus" if deleted else "Sesi dihapus dari index (data sudah tidak ada)"
+    return jsonify({"ok": True, "message": msg})
 
 
 @app.route("/api/sessions/<session_id>/posts")
@@ -280,14 +439,14 @@ def get_session_posts(session_id):
     sort_by = request.args.get("sort_by", "timestamp")
     sort_order = request.args.get("sort_order", "desc")
 
-    meta_path = CRAWLS_DIR / session_id / "metadata.json"
-    if not meta_path.exists():
-        return jsonify({"error": "Session not found"}), 404
-
-    posts = json.loads(meta_path.read_text(encoding="utf-8"))
+    posts = _load_metadata(session_id)
+    if posts is None:
+        return jsonify({"error": MISSING_MSG}), 404
 
     for p in posts:
-        p.update(get_post_sentiment(p.get("caption", ""), p.get("comments", [])))
+        sentiment = get_post_sentiment(p.get("caption", ""), p.get("comments", []))
+        p["sentiment"] = sentiment["sentiment"]
+        p["sentiment_score"] = sentiment["score"]
 
     ranked = sorted(posts, key=lambda p: p.get("like_count", 0) + p.get("comments_count", 0), reverse=True)
     rank_map = {p["id"]: i + 1 for i, p in enumerate(ranked)}
@@ -304,7 +463,7 @@ def get_session_posts(session_id):
     elif sort_by == "comments":
         posts.sort(key=lambda p: p.get("comments_count", 0), reverse=reverse)
     elif sort_by == "rank":
-        posts.sort(key=lambda p: p.get("like_count", 0) + p.get("comments_count", 0), reverse=reverse)
+        posts.sort(key=lambda p: p.get("rank", 0), reverse=not reverse)
     else:
         posts.sort(key=lambda p: p.get("timestamp", ""), reverse=reverse)
 
@@ -324,10 +483,9 @@ def get_session_posts(session_id):
 
 @app.route("/api/sessions/<session_id>/posts/<post_id>")
 def get_single_post(session_id, post_id):
-    meta_path = CRAWLS_DIR / session_id / "metadata.json"
-    if not meta_path.exists():
-        return jsonify({"error": "Session not found"}), 404
-    posts = json.loads(meta_path.read_text(encoding="utf-8"))
+    posts = _load_metadata(session_id)
+    if posts is None:
+        return jsonify({"error": MISSING_MSG}), 404
     post = next((p for p in posts if p["id"] == post_id), None)
     if not post:
         return jsonify({"error": "Post not found"}), 404
@@ -336,11 +494,9 @@ def get_single_post(session_id, post_id):
 
 @app.route("/api/sessions/<session_id>/stats")
 def get_session_stats(session_id):
-    meta_path = CRAWLS_DIR / session_id / "metadata.json"
-    if not meta_path.exists():
-        return jsonify({"error": "Session not found"}), 404
-
-    posts = json.loads(meta_path.read_text(encoding="utf-8"))
+    posts = _load_metadata(session_id)
+    if posts is None:
+        return jsonify({"error": MISSING_MSG}), 404
 
     total = len(posts)
     type_counts: dict[str, int] = {}
@@ -353,12 +509,12 @@ def get_session_stats(session_id):
     for p in posts:
         t = p.get("media_type", "UNKNOWN")
         type_counts[t] = type_counts.get(t, 0) + 1
-        total_likes += p.get("like_count", 0)
+        likes = p.get("like_count", 0)
+        total_likes += likes
         total_comments += p.get("comments_count", 0)
 
-        lc = p.get("like_count", 0)
-        if lc > max_likes:
-            max_likes = lc
+        if likes > max_likes:
+            max_likes = likes
             top_post = p
 
         if p.get("timestamp"):
@@ -367,7 +523,7 @@ def get_session_stats(session_id):
     return jsonify({
         "total_posts": total,
         "type_counts": type_counts,
-        "total_likes": sum(p.get("like_count", 0) for p in posts),
+        "total_likes": total_likes,
         "total_comments": total_comments,
         "avg_likes": round(total_likes / total, 1) if total else 0,
         "avg_comments": round(total_comments / total, 1) if total else 0,
@@ -383,85 +539,99 @@ def get_session_stats(session_id):
     })
 
 
+MISSING_MSG = "Sesi ini tidak memiliki data metadata. Silakan scrap ulang."
+
+
 @app.route("/api/sessions/<session_id>/analytics/engagement")
 def session_engagement(session_id):
-    meta_path = CRAWLS_DIR / session_id / "metadata.json"
-    if not meta_path.exists():
-        return jsonify({"error": "Session not found"}), 404
+    cached = _get_cached_analytics(session_id, "engagement")
+    if cached is not None:
+        return jsonify(cached)
 
-    posts = json.loads(meta_path.read_text(encoding="utf-8"))
+    posts = _load_metadata(session_id)
+    if posts is None:
+        return jsonify({"error": MISSING_MSG}), 404
 
-    try:
-        scraper = InstagramScrapper()
-        account = scraper.get_account_info()
-        followers = account.get("followers_count", 0)
-    except Exception as e:
-        logger.warning(f"Gagal ambil followers count: {e}")
-        followers = 0
-
+    followers, reason = _get_followers_count(session_id)
     result = analyze_engagement(posts, followers)
+    result["followers_reason"] = reason
+    _set_cached_analytics(session_id, "engagement", result)
     return jsonify(result)
 
 
 @app.route("/api/sessions/<session_id>/analytics/sentiment")
 def session_sentiment(session_id):
-    meta_path = CRAWLS_DIR / session_id / "metadata.json"
-    if not meta_path.exists():
-        return jsonify({"error": "Session not found"}), 404
+    cached = _get_cached_analytics(session_id, "sentiment")
+    if cached is not None:
+        return jsonify(cached)
 
-    posts = json.loads(meta_path.read_text(encoding="utf-8"))
+    posts = _load_metadata(session_id)
+    if posts is None:
+        return jsonify({"error": MISSING_MSG}), 404
+
     result = analyze_sentiment(posts)
+    _set_cached_analytics(session_id, "sentiment", result)
     return jsonify(result)
 
 
 @app.route("/api/sessions/<session_id>/analytics/insights")
 def session_insights(session_id):
-    meta_path = CRAWLS_DIR / session_id / "metadata.json"
-    if not meta_path.exists():
-        return jsonify({"error": "Session not found"}), 404
+    cached = _get_cached_analytics(session_id, "insights")
+    if cached is not None:
+        return jsonify(cached)
 
-    posts = json.loads(meta_path.read_text(encoding="utf-8"))
+    posts = _load_metadata(session_id)
+    if posts is None:
+        return jsonify({"error": MISSING_MSG}), 404
 
-    try:
-        scraper = InstagramScrapper()
-        account = scraper.get_account_info()
-        followers = account.get("followers_count", 0)
-    except Exception as e:
-        logger.warning(f"Gagal ambil followers count: {e}")
-        followers = 0
-
+    followers, reason = _get_followers_count(session_id)
     result = analyze_target_market(posts, followers)
+    result["followers_reason"] = reason
+    _set_cached_analytics(session_id, "insights", result)
     return jsonify(result)
 
 
 @app.route("/api/sessions/<session_id>/analytics/best-time")
 def session_best_time(session_id):
-    meta_path = CRAWLS_DIR / session_id / "metadata.json"
-    if not meta_path.exists():
-        return jsonify({"error": "Session not found"}), 404
-    posts = json.loads(meta_path.read_text(encoding="utf-8"))
+    cached = _get_cached_analytics(session_id, "best-time")
+    if cached is not None:
+        return jsonify(cached)
+
+    posts = _load_metadata(session_id)
+    if posts is None:
+        return jsonify({"error": MISSING_MSG}), 404
     result = analyze_best_time_to_post(posts)
+    _set_cached_analytics(session_id, "best-time", result)
     return jsonify(result)
 
 
 @app.route("/api/sessions/<session_id>/analytics/wordcloud")
 def session_wordcloud(session_id):
-    meta_path = CRAWLS_DIR / session_id / "metadata.json"
-    if not meta_path.exists():
-        return jsonify({"error": "Session not found"}), 404
-    posts = json.loads(meta_path.read_text(encoding="utf-8"))
     max_words = request.args.get("max", 80, type=int)
+    cache_key = f"wordcloud_{max_words}"
+    cached = _get_cached_analytics(session_id, cache_key)
+    if cached is not None:
+        return jsonify(cached)
+
+    posts = _load_metadata(session_id)
+    if posts is None:
+        return jsonify({"error": MISSING_MSG}), 404
     result = extract_word_frequencies(posts, max_words)
+    _set_cached_analytics(session_id, cache_key, result)
     return jsonify(result)
 
 
 @app.route("/api/sessions/<session_id>/analytics/content-categories")
 def session_content_categories(session_id):
-    meta_path = CRAWLS_DIR / session_id / "metadata.json"
-    if not meta_path.exists():
-        return jsonify({"error": "Session not found"}), 404
-    posts = json.loads(meta_path.read_text(encoding="utf-8"))
+    cached = _get_cached_analytics(session_id, "content-categories")
+    if cached is not None:
+        return jsonify(cached)
+
+    posts = _load_metadata(session_id)
+    if posts is None:
+        return jsonify({"error": MISSING_MSG}), 404
     result = analyze_content_categories(posts)
+    _set_cached_analytics(session_id, "content-categories", result)
     return jsonify(result)
 
 
@@ -484,26 +654,40 @@ def download_images(session_id):
     if not media_dir.exists():
         return jsonify({"error": "No media found"}), 404
 
-    data = io.BytesIO()
-    with zipfile.ZipFile(data, "w", zipfile.ZIP_DEFLATED) as zf:
-        for date_folder in sorted(media_dir.iterdir()):
-            if not date_folder.is_dir():
-                continue
-            for file in sorted(date_folder.iterdir()):
-                zf.write(file, f"{date_folder.name}/{file.name}")
+    tmp = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
+    try:
+        import zipfile
+        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zf:
+            for date_folder in sorted(media_dir.iterdir()):
+                if not date_folder.is_dir():
+                    continue
+                for file in sorted(date_folder.iterdir()):
+                    zf.write(file, f"{date_folder.name}/{file.name}")
 
-    data.seek(0)
-    return send_file(
-        data,
-        mimetype="application/zip",
-        as_attachment=True,
-        download_name=f"ig_images_{session_id}.zip",
-    )
+        tmp.close()
+        return send_file(
+            tmp.name,
+            mimetype="application/zip",
+            as_attachment=True,
+            download_name=f"ig_images_{session_id}.zip",
+        )
+    except Exception:
+        import os
+        os.unlink(tmp.name)
+        raise
 
 
 @app.route("/api/media/<session_id>/<path:filepath>")
 def serve_media(session_id, filepath):
     media_dir = CRAWLS_DIR / session_id / "media"
+    resolved = (media_dir / filepath).resolve()
+
+    if not resolved.is_relative_to(media_dir.resolve()):
+        return jsonify({"error": "Forbidden"}), 403
+
+    if not resolved.exists():
+        return jsonify({"error": "Not found"}), 404
+
     return send_from_directory(media_dir, filepath)
 
 
@@ -550,6 +734,7 @@ def wp_post_task(session_id: str, post_ids: list[str], progress_key: str):
 
     def update_prog(**kw):
         with scrap_lock:
+            _cleanup_old_progress()
             scrap_progress[progress_key].update(kw)
 
     try:
@@ -559,18 +744,16 @@ def wp_post_task(session_id: str, post_ids: list[str], progress_key: str):
                 "wp_posted": 0, "wp_total": 0, "message": "Memulai upload ke WordPress...",
             }
 
-        meta_path = CRAWLS_DIR / session_id / "metadata.json"
-        if not meta_path.exists():
-            update_prog(status="error", message="Session metadata tidak ditemukan")
+        posts = _load_metadata(session_id)
+        if posts is None:
+            update_prog(status="error", _completed_at=time.time(), message="Session metadata tidak ditemukan")
             return
-
-        posts = json.loads(meta_path.read_text(encoding="utf-8"))
 
         if post_ids:
             posts = [p for p in posts if p.get("id") in post_ids]
 
         if not posts:
-            update_prog(status="done", message="Tidak ada post untuk dikirim", wp_posted=0, wp_total=0)
+            update_prog(status="done", _completed_at=time.time(), message="Tidak ada post untuk dikirim", wp_posted=0, wp_total=0)
             return
 
         wp = WordPressClient()
@@ -581,7 +764,7 @@ def wp_post_task(session_id: str, post_ids: list[str], progress_key: str):
         results = wp.post_all(posts, status=WP_POST_STATUS, progress_callback=wp_progress)
         success = sum(1 for r in results if r.get("success"))
         update_prog(
-            status="done",
+            status="done", _completed_at=time.time(),
             message=f"WordPress: {success}/{len(posts)} post berhasil diupload",
             wp_results=results,
         )
@@ -592,6 +775,7 @@ def wp_post_task(session_id: str, post_ids: list[str], progress_key: str):
             scrap_progress[progress_key] = {
                 "status": "error", "session_id": session_id,
                 "message": f"Error: {str(e)}",
+                "_completed_at": time.time(),
             }
 
 
@@ -600,6 +784,10 @@ def update_token():
     try:
         data = request.get_json(silent=True) or {}
         new_token = (data.get("access_token") or "").strip()
+
+        if "\n" in new_token or "\r" in new_token:
+            return jsonify({"error": "Token mengandung karakter tidak valid"}), 400
+
         if not new_token:
             return jsonify({"error": "Token tidak boleh kosong"}), 400
 
@@ -619,6 +807,8 @@ def update_token():
         config.ACCESS_TOKEN = new_token
         scrapper.ACCESS_TOKEN = new_token
 
+        _invalidate_scraper()
+
         global ACCESS_TOKEN
         ACCESS_TOKEN = new_token
 
@@ -630,9 +820,8 @@ def update_token():
 
 @app.route("/api/config/ig-test")
 def test_ig_token():
-    from scrapper import InstagramScrapper
     try:
-        c = InstagramScrapper()
+        c = _get_scraper()
         info = c.get_account_info()
         return jsonify({
             "ok": True,
@@ -647,9 +836,8 @@ def test_ig_token():
 
 @app.route("/api/config/account")
 def get_account_info():
-    from scrapper import InstagramScrapper
     try:
-        c = InstagramScrapper()
+        c = _get_scraper()
         info = c.get_account_info()
         return jsonify({"ok": True, "account": info})
     except Exception as e:
@@ -657,11 +845,38 @@ def get_account_info():
 
 
 @app.route("/api/config/sentiment-words")
-def get_sentiment_words():
-    return jsonify({
-        "positive": sorted(POSITIVE_WORDS),
-        "negative": sorted(NEGATIVE_WORDS),
-    })
+def handle_get_sentiment_words():
+    return jsonify(get_sentiment_words())
+
+
+@app.route("/api/config/sentiment-words/add", methods=["POST"])
+def handle_add_sentiment_word():
+    data = request.get_json(silent=True) or {}
+    word = data.get("word", "").strip()
+    category = data.get("category", "")
+    if not word:
+        return jsonify({"error": "Kata tidak boleh kosong"}), 400
+    if category not in ("positive", "negative"):
+        return jsonify({"error": "Kategori harus 'positive' atau 'negative'"}), 400
+    ok = add_sentiment_word(word, category)
+    if not ok:
+        return jsonify({"error": "Gagal menambah kata"}), 400
+    return jsonify({"ok": True, "message": f"Kata '{word}' ditambahkan ke {category}", "words": get_sentiment_words()})
+
+
+@app.route("/api/config/sentiment-words/remove", methods=["POST"])
+def handle_remove_sentiment_word():
+    data = request.get_json(silent=True) or {}
+    word = data.get("word", "").strip()
+    category = data.get("category", "")
+    if not word:
+        return jsonify({"error": "Kata tidak boleh kosong"}), 400
+    if category not in ("positive", "negative"):
+        return jsonify({"error": "Kategori harus 'positive' atau 'negative'"}), 400
+    ok = remove_sentiment_word(word, category)
+    if not ok:
+        return jsonify({"error": "Gagal menghapus kata"}), 400
+    return jsonify({"ok": True, "message": f"Kata '{word}' dihapus dari {category}", "words": get_sentiment_words()})
 
 
 @app.route("/api/sessions/<session_id>/post-to-wp", methods=["POST"])
@@ -685,4 +900,4 @@ def post_session_to_wp(session_id):
 
 if __name__ == "__main__":
     logger.info("IG Crawler Dashboard berjalan di http://localhost:5000")
-    app.run(debug=True, host="0.0.0.0", port=5000)
+    app.run(debug=False, host="0.0.0.0", port=5000)

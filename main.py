@@ -4,13 +4,10 @@ import sys
 from pathlib import Path
 from datetime import datetime
 
-from dotenv import load_dotenv
-
-load_dotenv()
-
 from config import ACCESS_TOKEN, IG_USER_ID, DATE_FROM, DATE_TO, OUTPUT_DIR
 from scrapper import InstagramScrapper
 from downloader import download_media
+from utils import save_metadata
 
 logging.basicConfig(
     level=logging.INFO,
@@ -30,34 +27,6 @@ def validate_config():
         for e in errors:
             logger.error(e)
         sys.exit(1)
-
-
-def save_metadata(posts: list[dict], path: Path):
-    cleaned = []
-    for p in posts:
-        cleaned.append({
-            "id": p.get("id"),
-            "media_type": p.get("media_type"),
-            "caption": p.get("caption"),
-            "timestamp": p.get("timestamp"),
-            "permalink": p.get("permalink"),
-            "like_count": p.get("like_count", 0),
-            "comments_count": p.get("comments_count", 0),
-            "media_url": p.get("media_url"),
-            "thumbnail_url": p.get("thumbnail_url"),
-            "media_files": p.get("_media_files", []),
-            "children": [
-                {
-                    "id": c.get("id"),
-                    "media_type": c.get("media_type"),
-                    "media_url": c.get("media_url"),
-                    "thumbnail_url": c.get("thumbnail_url"),
-                }
-                for c in p.get("children", {}).get("data", [])
-            ] if p.get("children") else [],
-        })
-    path.write_text(json.dumps(cleaned, indent=2, ensure_ascii=False))
-    logger.info(f"Metadata disimpan: {path} ({len(cleaned)} post)")
 
 
 def main():
@@ -96,7 +65,6 @@ def main():
     except Exception as e:
         logger.warning(f"Download media gagal: {e}")
 
-    # update metadata dengan path file lokal
     save_metadata(posts, meta_path)
 
     logger.info("Selesai!")

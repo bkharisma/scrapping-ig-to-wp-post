@@ -23,3 +23,7 @@ WP_USER = os.getenv("WP_USER", "")
 WP_APP_PASS = os.getenv("WP_APP_PASS", "")
 WP_POST_STATUS = os.getenv("WP_POST_STATUS", "draft")
 WP_TEMPLATE_POST_ID = int(os.getenv("WP_TEMPLATE_POST_ID", "0"))
+
+API_KEY = os.getenv("API_KEY", "")
+METADATA_CACHE_TTL = int(os.getenv("METADATA_CACHE_TTL", "60"))
+MAX_CONCURRENT_DOWNLOADS = int(os.getenv("MAX_CONCURRENT_DOWNLOADS", "4"))

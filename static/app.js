@@ -72,18 +72,20 @@ async function deleteSession(sessionId) {
 async function switchSession(sessionId) {
     activeSession = sessionId;
     currentPage = 1;
+    analyticsLoaded = {};
+    analyticsData = {};
+    destroyAllCharts();
     document.getElementById('activeSessionLabel').textContent = 'Sesi: ' + sessionId;
 
     document.querySelectorAll('.session-item').forEach(el => {
         el.classList.toggle('active', el.dataset?.sessionId === sessionId);
     });
 
-    // Refresh session list highlight
     loadSessions();
 
     await loadStats(sessionId);
-    await loadAnalytics(sessionId);
-    await loadPosts();
+    loadPosts();
+    loadAnalyticsTab('engagement');
 }
 
 // --- Posts ---
@@ -105,8 +107,12 @@ async function loadPosts() {
         const res = await fetch(`/api/sessions/${activeSession}/posts?${params}`);
         const data = await res.json();
 
-        if (data.error) {
-            showError(data.error);
+        if (!res.ok || data.error) {
+            showError(data.error || `Server error (${res.status})`);
+            document.getElementById('pagination').innerHTML = '';
+            document.getElementById('paginationInfo').textContent = '0 hasil';
+            document.getElementById('statsCard').classList.add('d-none');
+            document.getElementById('analyticsCard').classList.add('d-none');
             return;
         }
 
@@ -251,29 +257,59 @@ async function loadStats(sessionId) {
 
 // --- Analytics ---
 let analyticsData = {};
+let analyticsLoaded = {};
 let chartInstances = {};
 
-async function loadAnalytics(sessionId) {
-    analyticsData = {};
-    destroyAllCharts();
-    try {
-        const [eng, sent, ins, bestTime, wc, cats] = await Promise.all([
-            fetch(`/api/sessions/${sessionId}/analytics/engagement`).then(r => r.json()),
-            fetch(`/api/sessions/${sessionId}/analytics/sentiment`).then(r => r.json()),
-            fetch(`/api/sessions/${sessionId}/analytics/insights`).then(r => r.json()),
-            fetch(`/api/sessions/${sessionId}/analytics/best-time`).then(r => r.json()),
-            fetch(`/api/sessions/${sessionId}/analytics/wordcloud?max=80`).then(r => r.json()),
-            fetch(`/api/sessions/${sessionId}/analytics/content-categories`).then(r => r.json()),
-        ]);
-        analyticsData = {
-            engagement: eng, sentiment: sent, insights: ins,
-            bestTime: bestTime, wordcloud: wc, categories: cats,
-        };
-        document.getElementById('analyticsCard').classList.remove('d-none');
-        renderAnalyticsTab('engagement');
-    } catch (e) {
-        console.error('Failed to load analytics:', e);
+const TAB_ENDPOINTS = {
+    engagement: 'engagement',
+    sentiment: 'sentiment',
+    insights: 'insights',
+    bestTime: 'best-time',
+    wordcloud: 'wordcloud?max=80',
+    categories: 'content-categories',
+};
+
+async function loadAnalyticsTab(tab) {
+    if (analyticsLoaded[tab]) {
+        switchAnalyticsTab(tab);
+        return;
     }
+
+    if (!activeSession) return;
+
+    document.getElementById('analyticsCard').classList.remove('d-none');
+    document.getElementById('analyticsContent').innerHTML =
+        '<div class="text-center py-4 text-muted small">Memuat analitik...</div>';
+
+    try {
+        const endpoint = TAB_ENDPOINTS[tab];
+        const res = await fetch(`/api/sessions/${activeSession}/analytics/${endpoint}`);
+        const data = await res.json();
+
+        if (!res.ok) {
+            analyticsContentError(data.error || `Server error (${res.status})`);
+            return;
+        }
+
+        if (data.error) {
+            analyticsContentError(data.error);
+            return;
+        }
+
+        analyticsData[tab] = data;
+        analyticsLoaded[tab] = true;
+        switchAnalyticsTab(tab);
+    } catch (e) {
+        console.error('Failed to load analytics tab:', tab, e);
+        analyticsContentError('Gagal terhubung ke server. Cek apakah aplikasi berjalan.');
+    }
+}
+
+function analyticsContentError(msg) {
+    const container = document.getElementById('analyticsContent');
+    container.innerHTML = '<div class="text-center py-4 text-muted small">' + escapeHtml(msg) + '</div>';
+    const card = document.getElementById('analyticsCard');
+    card.classList.remove('d-none');
 }
 
 function switchAnalyticsTab(tab) {
@@ -284,10 +320,12 @@ function switchAnalyticsTab(tab) {
         wordcloud: 'tabWordCloud', categories: 'tabCategories',
     };
     document.getElementById(btnMap[tab]).classList.add('active');
-    renderAnalyticsTab(tab);
-}
 
-function renderAnalyticsTab(tab) {
+    if (!analyticsLoaded[tab]) {
+        loadAnalyticsTab(tab);
+        return;
+    }
+
     destroyAllCharts();
     if (tab === 'engagement') renderEngagement();
     else if (tab === 'sentiment') renderSentiment();
@@ -310,17 +348,45 @@ function renderEngagement() {
         return;
     }
 
+    const hasFollowers = d.has_followers_data;
+    const metricLabel = hasFollowers ? 'ER' : 'Interaksi';
+    const metricSuffix = hasFollowers ? '%' : '';
+    const rateKey = hasFollowers ? 'avg_engagement_rate' : 'avg_interactions';
+
     const typeLabels = { IMAGE: 'Foto', VIDEO: 'Video', CAROUSEL_ALBUM: 'Album' };
     let typeHtml = '';
     for (const [k, v] of Object.entries(d.by_media_type || {})) {
-        const pct = d.average_engagement_rate ? ((v.avg_engagement_rate / d.average_engagement_rate) * 100).toFixed(0) : 0;
-        typeHtml += `<div class="mb-1"><span class="badge bg-secondary me-1">${typeLabels[k] || k}</span> <span class="fw-semibold">${v.avg_engagement_rate}%</span> <small class="text-muted">(${v.count} post, ${pct}% dari rata2)</small></div>`;
+        const val = v[rateKey] || 0;
+        const pct = d.average_engagement_rate ? ((val / d.average_engagement_rate) * 100).toFixed(0) : 0;
+        typeHtml += `<div class="mb-1"><span class="badge bg-secondary me-1">${typeLabels[k] || k}</span> <span class="fw-semibold">${val}${metricSuffix}</span> <small class="text-muted">(${v.count} post, ${pct}% dari rata2)</small></div>`;
     }
 
     let topHtml = '';
     (d.top_5_posts || []).forEach((p, i) => {
-        topHtml += `<div class="mb-1 small"><span class="badge bg-light text-dark me-1">#${i+1}</span> ${p.engagement_rate}% — ${escapeHtml((p.caption || '').substring(0, 60))}</div>`;
+        const val = hasFollowers ? p.engagement_rate : p.interactions;
+        topHtml += `<div class="mb-1 small"><span class="badge bg-light text-dark me-1">#${i+1}</span> ${val}${metricSuffix} — ${escapeHtml((p.caption || '').substring(0, 60))}</div>`;
     });
+
+    const reasonMap = {
+        cached: 'Dari data tersimpan',
+        api_unavailable: 'Gagal ambil data',
+        api_returned_zero: '0 followers di API',
+    };
+    const reasonText = reasonMap[d.followers_reason] || d.followers_reason || 'Tidak tersedia';
+
+    const followersHtml = hasFollowers
+        ? `<div class="col-4">
+                <div class="p-2 bg-light rounded text-center">
+                    <div class="fw-bold fs-5">${(d.followers_count || 0).toLocaleString()}</div>
+                    <small class="text-muted">Followers</small>
+                </div>
+           </div>`
+        : `<div class="col-4">
+                <div class="p-2 bg-light rounded text-center">
+                    <div class="fw-bold fs-6 small text-secondary">${reasonText}</div>
+                    <small class="text-muted">Followers</small>
+                </div>
+           </div>`;
 
     document.getElementById('analyticsContent').innerHTML = `
     <div class="row g-2">
@@ -328,8 +394,8 @@ function renderEngagement() {
             <div class="row g-2 mb-2">
                 <div class="col-4">
                     <div class="p-2 bg-light rounded text-center">
-                        <div class="fw-bold fs-5">${d.average_engagement_rate}%</div>
-                        <small class="text-muted">Rata-rata ER</small>
+                        <div class="fw-bold fs-5">${d.average_engagement_rate}${metricSuffix}</div>
+                        <small class="text-muted">Rata-rata ${metricLabel}</small>
                     </div>
                 </div>
                 <div class="col-4">
@@ -338,12 +404,7 @@ function renderEngagement() {
                         <small class="text-muted">Total Interaksi</small>
                     </div>
                 </div>
-                <div class="col-4">
-                    <div class="p-2 bg-light rounded text-center">
-                        <div class="fw-bold fs-5">${(d.followers_count || 0).toLocaleString()}</div>
-                        <small class="text-muted">Followers</small>
-                    </div>
-                </div>
+                ${followersHtml}
             </div>
             <h6 class="mb-1">Per Tipe Media</h6>
             ${typeHtml || '<small class="text-muted">Tidak ada data</small>'}
@@ -352,7 +413,7 @@ function renderEngagement() {
             ${topHtml || '<small class="text-muted">Tidak ada data</small>'}
         </div>
         <div class="col-md-5">
-            <h6 class="mb-1">Tren Engagement Bulanan</h6>
+            <h6 class="mb-1">Tren ${hasFollowers ? 'Engagement Rate' : 'Interaksi'} Bulanan</h6>
             <canvas id="chartEngagementTrend" height="200"></canvas>
         </div>
     </div>`;
@@ -366,7 +427,7 @@ function renderEngagement() {
             data: {
                 labels: months,
                 datasets: [{
-                    label: 'Engagement Rate (%)',
+                    label: hasFollowers ? 'Engagement Rate (%)' : 'Rata-rata Interaksi',
                     data: values,
                     borderColor: '#0d6efd',
                     backgroundColor: 'rgba(13,110,253,0.1)',
@@ -379,7 +440,7 @@ function renderEngagement() {
                 responsive: true,
                 plugins: { legend: { display: false } },
                 scales: {
-                    y: { beginAtZero: true, ticks: { callback: v => v + '%' } }
+                    y: { beginAtZero: true, ticks: { callback: v => hasFollowers ? v + '%' : v } }
                 }
             }
         });
@@ -485,12 +546,16 @@ function renderInsights() {
     }
 
     const typeLabels = { IMAGE: 'Foto', VIDEO: 'Video', CAROUSEL_ALBUM: 'Album' };
+    const hasFollowers = d.has_followers_data;
+    const perfKey = hasFollowers ? 'avg_engagement_rate' : 'avg_interactions';
+    const perfSuffix = hasFollowers ? '%' : ' int.';
     let typeHtml = '';
     const typePerf = d.media_type_performance || {};
-    const maxType = Math.max(...Object.values(typePerf).map(v => v.avg_engagement_rate || 0), 0.001);
+    const maxType = Math.max(...Object.values(typePerf).map(v => v[perfKey] || 0), 0.001);
     for (const [k, v] of Object.entries(typePerf)) {
-        const pct = (v.avg_engagement_rate / maxType * 100).toFixed(0);
-        typeHtml += `<div class="mb-1"><span class="badge bg-secondary me-1">${typeLabels[k] || k}</span><div class="progress" style="height:16px"><div class="progress-bar ${k === d.best_media_type ? 'bg-success' : 'bg-primary'}" style="width:${pct}%">${v.avg_engagement_rate}% (${v.count} post)</div></div></div>`;
+        const val = v[perfKey] || 0;
+        const pct = (val / maxType * 100).toFixed(0);
+        typeHtml += `<div class="mb-1"><span class="badge bg-secondary me-1">${typeLabels[k] || k}</span><div class="progress" style="height:16px"><div class="progress-bar ${k === d.best_media_type ? 'bg-success' : 'bg-primary'}" style="width:${pct}%">${val}${perfSuffix} (${v.count} post)</div></div></div>`;
     }
 
     const cons = d.engagement_consistency || {};
@@ -1252,33 +1317,19 @@ function showError(msg) {
         `<tr><td colspan="9" class="text-center py-5 text-danger">${escapeHtml(msg)}</td></tr>`;
 }
 
-const POSITIVE_WORDS = new Set([
-    "baik","bagus","hebat","keren","mantap","sukses","indah","cantik",
-    "menarik","nyaman","senang","bahagia","puas","bangga","lucu",
-    "imut","gemas","bersyukur","terima kasih","makasih","love","suka",
-    "sempurna","istimewa","luar biasa","recommended","rekomendasi",
-    "wow","amazing","beautiful","great","awesome","fantastic",
-    "terbaik","terkeren","terindah","terlucu","kreatif","inovatif",
-    "menginspirasi","inspiratif","motivasi","semangat","keren abis",
-    "cakep","kece","sip","top","nice","good","perfect",
-    "inspiring","wonderful","excellent","brilliant","stunning",
-    "murah","hemat","untung","berkah","sehat","segar","cerah",
-]);
+let clientPOSITIVE = new Set();
+let clientNEGATIVE = new Set();
 
-const NEGATIVE_WORDS = new Set([
-    "buruk","jelek","parah","payah","mengerikan","menyedihkan",
-    "kecewa","gagal","rugi","susah","sulit","sedih","marah",
-    "benci","muak","jijik","bosan","membosankan","capek","lelah",
-    "gak enak","ga enak","nggak enak","tidak enak","sampah",
-    "mengecewakan","menjijikkan","horor","mengerikan","ngeri",
-    "jahat","kejam","kasar","buruk banget","jelek banget",
-    "worst","bad","terrible","awful","hate","ugly","boring",
-    "horrible","disappointed","disappointing","fail","failed",
-    "sakit","pusing","stress","frustrasi","kalut","kacau",
-    "mahal","boros","menyesal","nyesel","zonk","gagal total",
-    "tidak suka","ga suka","gak suka","nggak suka","ga mood",
-    "berantakan","amburadul","sembarangan","asalan",
-]);
+async function fetchSentimentWords() {
+    try {
+        const res = await fetch('/api/config/sentiment-words');
+        const data = await res.json();
+        clientPOSITIVE = new Set(data.positive || []);
+        clientNEGATIVE = new Set(data.negative || []);
+    } catch (e) {
+        console.error('Gagal memuat kata sentimen:', e);
+    }
+}
 
 function getPostSentiment(text) {
     let cleaned = (text || '').toLowerCase()
@@ -1291,14 +1342,14 @@ function getPostSentiment(text) {
     let neg_count = 0;
 
     words.forEach(w => {
-        if (POSITIVE_WORDS.has(w)) pos_count++;
-        if (NEGATIVE_WORDS.has(w)) neg_count++;
+        if (clientPOSITIVE.has(w)) pos_count++;
+        if (clientNEGATIVE.has(w)) neg_count++;
     });
 
-    POSITIVE_WORDS.forEach(phrase => {
+    clientPOSITIVE.forEach(phrase => {
         if (phrase.includes(' ') && cleaned.includes(phrase)) pos_count++;
     });
-    NEGATIVE_WORDS.forEach(phrase => {
+    clientNEGATIVE.forEach(phrase => {
         if (phrase.includes(' ') && cleaned.includes(phrase)) neg_count++;
     });
 
@@ -1332,43 +1383,111 @@ async function openSentimentWordsModal() {
     modal.show();
 
     try {
-        const res = await fetch('/api/config/sentiment-words');
-        const data = await res.json();
-
-        if (data.error) {
-            container.innerHTML = `<div class="text-danger text-center py-3">${escapeHtml(data.error)}</div>`;
-            return;
-        }
-
-        function renderBadges(words, label, badgeClass) {
-            if (!words.length) return '<small class="text-muted">Tidak ada kata</small>';
-            return words.map(w => `<span class="badge ${badgeClass} me-1 mb-1">${escapeHtml(w)}</span>`).join('');
-        }
-
-        container.innerHTML = `
-            <div class="col-md-6">
-                <div class="card h-100">
-                    <div class="card-header py-1 bg-success text-white">
-                        <i class="bi bi-emoji-smile"></i> Positif (${data.positive.length})
-                    </div>
-                    <div class="card-body small" style="max-height:300px;overflow-y:auto">
-                        ${renderBadges(data.positive, 'Positif', 'bg-success')}
-                    </div>
-                </div>
-            </div>
-            <div class="col-md-6">
-                <div class="card h-100">
-                    <div class="card-header py-1 bg-danger text-white">
-                        <i class="bi bi-emoji-frown"></i> Negatif (${data.negative.length})
-                    </div>
-                    <div class="card-body small" style="max-height:300px;overflow-y:auto">
-                        ${renderBadges(data.negative, 'Negatif', 'bg-danger')}
-                    </div>
-                </div>
-            </div>
-        `;
+        await fetchSentimentWords();
+        renderSentimentWordsModal(container);
     } catch (e) {
         container.innerHTML = `<div class="text-danger text-center py-3">Error: ${escapeHtml(e.message)}</div>`;
+    }
+}
+
+function renderSentimentWordsModal(container) {
+    const posWords = [...clientPOSITIVE].sort();
+    const negWords = [...clientNEGATIVE].sort();
+
+    function renderBadgesWithRemove(words, category, badgeClass) {
+        if (!words.length) return '<small class="text-muted">Tidak ada kata</small>';
+        return words.map(w =>
+            `<span class="badge ${badgeClass} me-1 mb-1 sentiment-word-badge">
+                ${escapeHtml(w)}
+                <button class="btn-remove-word" onclick="removeSentimentWord('${escapeHtml(w)}', '${category}')" title="Hapus">&times;</button>
+            </span>`
+        ).join('');
+    }
+
+    container.innerHTML = `
+        <div class="col-md-6">
+            <div class="card h-100">
+                <div class="card-header py-1 bg-success text-white d-flex justify-content-between align-items-center">
+                    <span><i class="bi bi-emoji-smile"></i> Positif (${posWords.length})</span>
+                </div>
+                <div class="card-body small" style="max-height:250px;overflow-y:auto">
+                    <div class="mb-2 d-flex gap-1">
+                        <input type="text" class="form-control form-control-sm" id="inputAddPositive" placeholder="Tambah kata positif..." onkeydown="if(event.key==='Enter') addSentimentWord('positive')">
+                        <button class="btn btn-sm btn-success" onclick="addSentimentWord('positive')"><i class="bi bi-plus"></i></button>
+                    </div>
+                    <div id="positiveWordsList">${renderBadgesWithRemove(posWords, 'positive', 'bg-success')}</div>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-6">
+            <div class="card h-100">
+                <div class="card-header py-1 bg-danger text-white d-flex justify-content-between align-items-center">
+                    <span><i class="bi bi-emoji-frown"></i> Negatif (${negWords.length})</span>
+                </div>
+                <div class="card-body small" style="max-height:250px;overflow-y:auto">
+                    <div class="mb-2 d-flex gap-1">
+                        <input type="text" class="form-control form-control-sm" id="inputAddNegative" placeholder="Tambah kata negatif..." onkeydown="if(event.key==='Enter') addSentimentWord('negative')">
+                        <button class="btn btn-sm btn-danger" onclick="addSentimentWord('negative')"><i class="bi bi-plus"></i></button>
+                    </div>
+                    <div id="negativeWordsList">${renderBadgesWithRemove(negWords, 'negative', 'bg-danger')}</div>
+                </div>
+            </div>
+        </div>
+        <div class="col-12 mt-2">
+            <div id="sentimentWordStatus" class="small"></div>
+        </div>
+    `;
+}
+
+async function addSentimentWord(category) {
+    const inputId = category === 'positive' ? 'inputAddPositive' : 'inputAddNegative';
+    const input = document.getElementById(inputId);
+    const word = input.value.trim();
+    if (!word) return;
+
+    const status = document.getElementById('sentimentWordStatus');
+    status.innerHTML = '<span class="text-muted">Menambah...</span>';
+
+    try {
+        const res = await fetch('/api/config/sentiment-words/add', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ word, category }),
+        });
+        const data = await res.json();
+        if (data.error) {
+            status.innerHTML = `<span class="text-danger">${escapeHtml(data.error)}</span>`;
+            return;
+        }
+        status.innerHTML = `<span class="text-success">${escapeHtml(data.message)}</span>`;
+        input.value = '';
+        await fetchSentimentWords();
+        renderSentimentWordsModal(document.getElementById('sentimentWordsContent'));
+    } catch (e) {
+        status.innerHTML = `<span class="text-danger">Error: ${escapeHtml(e.message)}</span>`;
+    }
+}
+
+async function removeSentimentWord(word, category) {
+    const status = document.getElementById('sentimentWordStatus');
+    status.innerHTML = '<span class="text-muted">Menghapus...</span>';
+
+    try {
+        const res = await fetch('/api/config/sentiment-words/remove', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ word, category }),
+        });
+        const data = await res.json();
+        if (data.error) {
+            status.innerHTML = `<span class="text-danger">${escapeHtml(data.error)}</span>`;
+            return;
+        }
+        status.innerHTML = `<span class="text-success">${escapeHtml(data.message)}</span>`;
+        await fetchSentimentWords();
+        renderSentimentWordsModal(document.getElementById('sentimentWordsContent'));
+    } catch (e) {
+        status.innerHTML = `<span class="text-danger">Error: ${escapeHtml(e.message)}</span>`;
     }
 }
 
@@ -1468,3 +1587,4 @@ async function updateToken() {
 // --- Init ---
 checkWpStatus();
 loadSessions();
+fetchSentimentWords();
