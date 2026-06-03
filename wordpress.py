@@ -216,27 +216,52 @@ class WordPressClient:
             return self._template_cache
 
         if not WP_TEMPLATE_POST_ID:
-            raise Exception("WP_TEMPLATE_POST_ID belum diisi di .env")
+            raise Exception(
+                "WP_TEMPLATE_POST_ID=0 di .env. "
+                "Template Elementor tidak diaktifkan. "
+                "Isi WP_TEMPLATE_POST_ID dengan ID post template Elementor yang sudah dibuat di WordPress."
+            )
 
-        resp = self.session.get(
-            f"{self._api_base}/posts/{WP_TEMPLATE_POST_ID}",
-            params={"context": "edit"},
-            timeout=30,
-        )
-        data = self._check_response(resp, "fetch_template")
+        el_data_str = ""
+        post_template = ""
+        page_settings = ""
+        found_in = ""
 
-        meta = data.get("meta", {})
-        el_data_str = meta.get("_elementor_data", "")
+        for endpoint, label in (
+            (f"{self._api_base}/posts/{WP_TEMPLATE_POST_ID}", "post"),
+            (f"{self.wp_url}/wp-json/wp/v2/elementor_library/{WP_TEMPLATE_POST_ID}", "elementor_library"),
+        ):
+            resp = self.session.get(
+                endpoint,
+                params={"context": "edit"},
+                timeout=30,
+            )
+            if resp.status_code == 404 or resp.status_code >= 500:
+                continue
+            data = self._check_response(resp, f"fetch_template/{label}")
+
+            meta = data.get("meta", {})
+            el_data_str = meta.get("_elementor_data", "")
+            if el_data_str:
+                post_template = data.get("template", "")
+                page_settings = meta.get("_elementor_page_settings", "")
+                found_in = label
+                break
+
         if not el_data_str:
-            raise Exception(f"Post {WP_TEMPLATE_POST_ID} tidak memiliki _elementor_data")
+            raise Exception(
+                f"Post #{WP_TEMPLATE_POST_ID} tidak ditemukan atau tidak memiliki _elementor_data. "
+                "Pastikan post/Elementor template dengan ID tersebut ada di WordPress "
+                "dan dibuat menggunakan Elementor builder."
+            )
 
         self._template_cache = {
             "elementor_data": json.loads(el_data_str),
-            "template": data.get("template", ""),
-            "page_settings": meta.get("_elementor_page_settings", ""),
+            "template": post_template,
+            "page_settings": page_settings,
         }
 
-        logger.info(f"Template fetched from post #{WP_TEMPLATE_POST_ID}")
+        logger.info(f"Template fetched from {found_in} #{WP_TEMPLATE_POST_ID}")
         return self._template_cache
 
     def _regenerate_ids(self, data):
@@ -418,6 +443,10 @@ class WordPressClient:
                 except Exception as e:
                     logger.warning(f"Elementor template gagal, fallback ke HTML: {e}")
                     use_elementor = False
+                    result["error"] = (
+                        f"Template Elementor gagal: {e}. "
+                        "Post dibuat sebagai HTML tanpa template."
+                    )
 
             if not use_elementor:
                 content = self._build_html_content(post, wp_media_items)

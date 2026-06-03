@@ -10,3 +10,5 @@ build/
 data/crawls/
 data/sentiment_words.json
 node_modules/
+# Added by code-review-graph
+.code-review-graph/
