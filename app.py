@@ -160,6 +160,26 @@ def _invalidate_metadata_cache(session_id: str):
             del _analytics_cache[k]
 
 
+def _load_wp_posted(session_id: str) -> dict[str, dict]:
+    wp_path = CRAWLS_DIR / session_id / "wp_posted.json"
+    if not wp_path.exists():
+        return {}
+    try:
+        return json.loads(wp_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _save_wp_posted(session_id: str, data: dict[str, dict]):
+    wp_path = CRAWLS_DIR / session_id / "wp_posted.json"
+    wp_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def _get_posted_ig_ids(session_id: str) -> set[str]:
+    data = _load_wp_posted(session_id)
+    return set(data.keys())
+
+
 def _get_cached_analytics(session_id: str, key: str) -> dict | None:
     cache_key = f"{session_id}/{key}"
     meta_path = CRAWLS_DIR / session_id / "metadata.json"
@@ -310,16 +330,43 @@ def scrap_task(date_from: str, date_to: str, media_types: list[str],
             try:
                 from wordpress import WordPressClient
                 wp = WordPressClient()
-                update_prog(message=f"Mengupload {len(posts)} post ke WordPress...")
 
-                def wp_progress(done, total, msg):
-                    update_prog(wp_posted=done, wp_total=total, message=msg)
+                posted_ids = _get_posted_ig_ids(session_id)
+                posts_to_post = [p for p in posts if p.get("id") not in posted_ids]
+                if len(posts_to_post) < len(posts):
+                    logger.info(f"Auto-post: {len(posts) - len(posts_to_post)} post sudah diposting, di-skip")
 
-                wp_results = wp.post_all(posts, status=WP_POST_STATUS, progress_callback=wp_progress)
+                if posts_to_post:
+                    update_prog(message=f"Mengupload {len(posts_to_post)} post ke WordPress...")
+
+                    def wp_progress(done, total, msg):
+                        update_prog(wp_posted=done, wp_total=total, message=msg)
+
+                    wp_results = wp.post_all(posts_to_post, status=WP_POST_STATUS, progress_callback=wp_progress)
+
+                    wp_posted_data = _load_wp_posted(session_id)
+                    for r in wp_results:
+                        ig_id = r.get("ig_post_id")
+                        wp_id = r.get("wp_post_id")
+                        if ig_id and (r.get("success") or r.get("skipped")):
+                            wp_posted_data.setdefault("posts", {})[ig_id] = {
+                                "wp_post_id": wp_id,
+                                "wp_edit_url": r.get("wp_edit_url", ""),
+                                "status": "skipped" if r.get("skipped") else "posted",
+                                "posted_at": datetime.now().isoformat(),
+                            }
+                    _save_wp_posted(session_id, wp_posted_data)
+                else:
+                    wp_results = [{"skipped": True, "ig_post_id": pid} for pid in posted_ids]
+
                 wp_ok = sum(1 for r in wp_results if r.get("success"))
+                wp_skip = sum(1 for r in wp_results if r.get("skipped"))
+                msg = f"Selesai! {len(posts)} post, {total_media} media, WP: {wp_ok}/{len(posts_to_post or [])} draft"
+                if wp_skip:
+                    msg += f", {wp_skip} skip"
                 update_prog(
                     status="done", download_pct=100, _completed_at=time.time(),
-                    message=f"Selesai! {len(posts)} post, {total_media} media, WP: {wp_ok}/{len(posts)} draft",
+                    message=msg,
                     session_id=session_id, wp_results=wp_results,
                 )
                 return
@@ -784,6 +831,21 @@ def wp_post_task(session_id: str, post_ids: list[str], progress_key: str):
             update_prog(status="done", _completed_at=time.time(), message="Tidak ada post untuk dikirim", wp_posted=0, wp_total=0)
             return
 
+        posted_ids = _get_posted_ig_ids(session_id)
+        if posted_ids:
+            skipped_count = sum(1 for p in posts if p.get("id") in posted_ids)
+            posts = [p for p in posts if p.get("id") not in posted_ids]
+            if skipped_count > 0:
+                logger.info(f"WP post: {skipped_count} IG post sudah diposting sebelumnya, di-skip")
+
+        if not posts:
+            update_prog(
+                status="done", _completed_at=time.time(),
+                message="Semua post sudah diposting sebelumnya (skip)",
+                wp_posted=0, wp_total=0,
+            )
+            return
+
         wp = WordPressClient()
 
         def wp_progress(done, total, msg):
@@ -791,9 +853,27 @@ def wp_post_task(session_id: str, post_ids: list[str], progress_key: str):
 
         results = wp.post_all(posts, status=WP_POST_STATUS, progress_callback=wp_progress)
         success = sum(1 for r in results if r.get("success"))
+        skipped = sum(1 for r in results if r.get("skipped"))
+
+        wp_posted_data = _load_wp_posted(session_id)
+        for r in results:
+            ig_id = r.get("ig_post_id")
+            wp_id = r.get("wp_post_id")
+            if ig_id and (r.get("success") or r.get("skipped")):
+                wp_posted_data.setdefault("posts", {})[ig_id] = {
+                    "wp_post_id": wp_id,
+                    "wp_edit_url": r.get("wp_edit_url", ""),
+                    "status": "skipped" if r.get("skipped") else "posted",
+                    "posted_at": datetime.now().isoformat(),
+                }
+        _save_wp_posted(session_id, wp_posted_data)
+
+        msg = f"WordPress: {success}/{len(posts)} post berhasil diupload"
+        if skipped:
+            msg += f", {skipped} skip"
         update_prog(
             status="done", _completed_at=time.time(),
-            message=f"WordPress: {success}/{len(posts)} post berhasil diupload",
+            message=msg,
             wp_results=results,
         )
 

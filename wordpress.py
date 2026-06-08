@@ -42,7 +42,7 @@ class WordPressClient:
             raise Exception(f"WP API error ({resp.status_code}) {context}: {body}")
         return resp.json()
 
-    def upload_media(self, file_path: str | Path, title: str = "") -> tuple[int, str] | None:
+    def upload_media(self, file_path: str | Path, title: str = "", fields: dict | None = None) -> tuple[int, str] | None:
         path = Path(file_path)
         if not path.exists():
             logger.warning(f"File tidak ditemukan: {path}")
@@ -60,25 +60,99 @@ class WordPressClient:
 
         try:
             with open(path, "rb") as f:
-                files = {"file": (filename, f, content_type)}
-                headers = {
-                    "Content-Disposition": f"attachment; filename={filename}",
-                }
+                data = {}
                 if title:
-                    headers["Content-Description"] = title
+                    data["title"] = title
+                if fields:
+                    data.update(fields)
+                files = {"file": (filename, f, content_type)}
                 resp = self.session.post(
                     f"{self._api_base}/media",
+                    data=data if data else None,
                     files=files,
-                    headers=headers,
                     timeout=120,
                 )
-            data = self._check_response(resp, "upload_media")
-            media_id = data.get("id")
-            source_url = data.get("source_url", "")
+            result = self._check_response(resp, "upload_media")
+            media_id = result.get("id")
+            source_url = result.get("source_url", "")
             logger.info(f"Media uploaded: {filename} -> WP media #{media_id} ({source_url})")
             return (media_id, source_url)
         except Exception as e:
             logger.error(f"Gagal upload media {filename}: {e}")
+            return None
+
+    @staticmethod
+    def _ig_post_id_marker(ig_post_id: str) -> str:
+        return f"<!-- ig_post_id: {ig_post_id} -->"
+
+    def _find_existing_post(self, ig_post_id: str) -> dict | None:
+        if not ig_post_id:
+            return None
+        marker = self._ig_post_id_marker(ig_post_id)
+        try:
+            resp = self.session.get(
+                f"{self._api_base}/posts",
+                params={
+                    "search": ig_post_id,
+                    "status": "publish,draft,pending,private,future",
+                    "per_page": 5,
+                },
+                timeout=15,
+            )
+            if resp.status_code != 200:
+                return None
+
+            posts = resp.json()
+            for p in posts:
+                content = p.get("content", {})
+                if isinstance(content, dict):
+                    content = content.get("rendered", "")
+                elif not isinstance(content, str):
+                    content = ""
+                if marker in content:
+                    edit_url = f"{self.wp_url}/wp-admin/post.php?post={p['id']}&action=edit"
+                    logger.info(f"Post IG {ig_post_id} sudah ada di WP #{p['id']}")
+                    return {"wp_post_id": p["id"], "wp_edit_url": edit_url}
+
+                meta = p.get("meta", {})
+                if isinstance(meta, dict) and meta.get("ig_post_id") == ig_post_id:
+                    edit_url = f"{self.wp_url}/wp-admin/post.php?post={p['id']}&action=edit"
+                    logger.info(f"Post IG {ig_post_id} sudah ada di WP #{p['id']} (via meta)")
+                    return {"wp_post_id": p["id"], "wp_edit_url": edit_url}
+
+            return None
+        except Exception as e:
+            logger.warning(f"Gagal cek duplikat post IG {ig_post_id}: {e}")
+            return None
+
+    def _find_existing_media(self, filename: str) -> tuple[int, str] | None:
+        if not filename:
+            return None
+        search_term = Path(filename).stem
+        try:
+            resp = self.session.get(
+                f"{self._api_base}/media",
+                params={
+                    "search": search_term,
+                    "per_page": 5,
+                    "_fields": "id,source_url,title",
+                },
+                timeout=15,
+            )
+            if resp.status_code != 200:
+                return None
+
+            results = resp.json()
+            for m in results:
+                title_raw = m.get("title", {})
+                title = title_raw.get("rendered", "") if isinstance(title_raw, dict) else str(title_raw)
+                if title == filename or title == search_term:
+                    logger.info(f"Media sudah ada di WP: #{m['id']} ({m.get('source_url', '')[:60]})")
+                    return (m["id"], m.get("source_url", ""))
+
+            return None
+        except Exception as e:
+            logger.warning(f"Gagal cek duplikat media {filename}: {e}")
             return None
 
     def create_post(
@@ -387,11 +461,13 @@ class WordPressClient:
         return json.dumps(cloned, ensure_ascii=False)
 
     def post_ig_post(self, post: dict, status: str = "") -> dict:
+        ig_post_id = post.get("id", "")
         result = {
-            "ig_post_id": post.get("id"),
+            "ig_post_id": ig_post_id,
             "media_type": post.get("media_type", ""),
             "title": "",
             "success": False,
+            "skipped": False,
             "wp_post_id": None,
             "wp_edit_url": None,
             "error": None,
@@ -404,6 +480,20 @@ class WordPressClient:
             result["logs"].append(entry)
 
         try:
+            existing = self._find_existing_post(ig_post_id)
+            if existing:
+                result["skipped"] = True
+                result["wp_post_id"] = existing["wp_post_id"]
+                result["wp_edit_url"] = existing["wp_edit_url"]
+                result["title"] = self._build_title(post)
+                _add_log(
+                    "skipped",
+                    f"Post IG {ig_post_id} sudah ada sebagai WP #{existing['wp_post_id']}",
+                    wp_post_id=existing["wp_post_id"],
+                )
+                logger.info(f"SKIP IG {ig_post_id}: sudah ada WP #{existing['wp_post_id']}")
+                return result
+
             media_files = self._get_media_files_for_post(post)
 
             _add_log(
@@ -416,8 +506,29 @@ class WordPressClient:
             featured_media_id = None
 
             for file_path, media_type in media_files:
-                filename = file_path.split("/")[-1]
-                upload_title = f"IG {post.get('id', '')} - {filename}"
+                filename = Path(file_path).name
+                upload_title = f"IG {ig_post_id} - {filename}"
+
+                existing_media = self._find_existing_media(filename)
+                if existing_media:
+                    media_id, source_url = existing_media
+                    wp_media_items.append({
+                        "id": media_id,
+                        "type": media_type,
+                        "source_url": source_url,
+                    })
+                    if featured_media_id is None:
+                        featured_media_id = media_id
+                    _add_log(
+                        "media_reused",
+                        f"{filename} sudah ada di WP, reuse",
+                        file=filename,
+                        wp_media_id=media_id,
+                        type=media_type,
+                        status="reused",
+                    )
+                    continue
+
                 upload_result = self.upload_media(file_path, title=upload_title)
                 if upload_result:
                     media_id, source_url = upload_result
@@ -454,28 +565,41 @@ class WordPressClient:
                         with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as f:
                             f.write(resp.content)
                             temp_path = f.name
-                        thumb_result = self.upload_media(
-                            temp_path,
-                            title=f"IG {post.get('id', '')} - thumbnail",
-                        )
-                        os.unlink(temp_path)
-                        if thumb_result:
-                            thumb_id, thumb_url = thumb_result
+                        thumb_title = f"IG {ig_post_id} - thumbnail"
+                        existing_media = self._find_existing_media(Path(temp_path).name)
+                        if existing_media:
+                            thumb_id, thumb_url = existing_media
                             featured_media_id = thumb_id
                             _add_log(
                                 "thumbnail",
-                                "Thumbnail diupload sebagai featured image",
+                                "Thumbnail sudah ada di WP, reuse",
                                 wp_media_id=thumb_id,
-                                status="ok",
+                                status="reused",
                                 set_as_featured=True,
                             )
-                            logger.info(f"Video thumbnail uploaded as featured image: #{thumb_id}")
                         else:
-                            _add_log(
-                                "thumbnail",
-                                "Thumbnail gagal diupload ke WP",
-                                status="failed",
+                            thumb_result = self.upload_media(
+                                temp_path,
+                                title=thumb_title + ".jpg",
                             )
+                            if thumb_result:
+                                thumb_id, thumb_url = thumb_result
+                                featured_media_id = thumb_id
+                                _add_log(
+                                    "thumbnail",
+                                    "Thumbnail diupload sebagai featured image",
+                                    wp_media_id=thumb_id,
+                                    status="ok",
+                                    set_as_featured=True,
+                                )
+                                logger.info(f"Video thumbnail uploaded as featured image: #{thumb_id}")
+                            else:
+                                _add_log(
+                                    "thumbnail",
+                                    "Thumbnail gagal diupload ke WP",
+                                    status="failed",
+                                )
+                        os.unlink(temp_path)
                     except Exception as e:
                         _add_log(
                             "thumbnail",
@@ -498,6 +622,7 @@ class WordPressClient:
             post_status = status or WP_POST_STATUS
 
             use_elementor = bool(WP_TEMPLATE_POST_ID)
+            ig_marker = self._ig_post_id_marker(ig_post_id)
 
             if use_elementor:
                 try:
@@ -508,7 +633,7 @@ class WordPressClient:
 
                     wp_post = self.create_post(
                         title=title,
-                        content="",
+                        content=ig_marker,
                         date=self._format_date(post.get("timestamp", "")),
                         featured_media=featured_media_id,
                         status=post_status,
@@ -518,6 +643,9 @@ class WordPressClient:
                             "_elementor_template_type": "wp-post",
                             "_elementor_data": elementor_data_str,
                             "_elementor_page_settings": template.get("page_settings", ""),
+                            "ig_post_id": ig_post_id,
+                            "ig_timestamp": post.get("timestamp", ""),
+                            "ig_permalink": post.get("permalink", ""),
                         },
                     )
 
@@ -553,6 +681,8 @@ class WordPressClient:
                         else:
                             content = f'<figure class="wp-block-image"><img src="{media_url}" /></figure>\n\n' + content
 
+                content = ig_marker + "\n" + content
+
                 wp_post = self.create_post(
                     title=title,
                     content=content,
@@ -560,7 +690,7 @@ class WordPressClient:
                     featured_media=featured_media_id,
                     status=post_status,
                     meta={
-                        "ig_post_id": post.get("id", ""),
+                        "ig_post_id": ig_post_id,
                         "ig_timestamp": post.get("timestamp", ""),
                         "ig_permalink": post.get("permalink", ""),
                     },
@@ -583,7 +713,7 @@ class WordPressClient:
         except Exception as e:
             result["error"] = str(e)
             _add_log("error", str(e), detail=str(e)[:200])
-            logger.error(f"Gagal post IG {post.get('id')}: {e}")
+            logger.error(f"Gagal post IG {ig_post_id}: {e}")
 
         return result
 
@@ -608,14 +738,23 @@ class WordPressClient:
             result = self.post_ig_post(post, status=status)
             results.append(result)
 
-            status_str = "OK" if result["success"] else f"GAGAL: {result['error']}"
+            if result.get("skipped"):
+                status_str = "SKIP (sudah ada)"
+            elif result["success"]:
+                status_str = "OK"
+            else:
+                status_str = f"GAGAL: {result['error']}"
             logger.info(f"[{i + 1}/{total}] IG {post.get('id')} -> {status_str}")
 
         success_count = sum(1 for r in results if r["success"])
-        logger.info(f"WP post selesai: {success_count}/{total} berhasil")
+        skipped_count = sum(1 for r in results if r.get("skipped"))
+        logger.info(f"WP post selesai: {success_count} baru + {skipped_count} skip / {total} total")
 
         if progress_callback:
-            progress_callback(total, total, f"WordPress: {success_count}/{total} post berhasil")
+            msg = f"WordPress: {success_count}/{total} post berhasil"
+            if skipped_count:
+                msg += f" ({skipped_count} skip)"
+            progress_callback(total, total, msg)
 
         return results
 
