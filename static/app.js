@@ -1034,7 +1034,7 @@ async function startScrap() {
         const res = await fetch('/api/scrap', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ date_from, date_to, media_types, fetch_comments }),
+            body: JSON.stringify({ date_from, date_to, media_types, fetch_comments, auto_post: document.getElementById('autoPost').checked }),
         });
         const data = await res.json();
 

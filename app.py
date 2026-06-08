@@ -233,7 +233,7 @@ def _get_followers_count(session_id: str) -> tuple[int, str]:
 
 def scrap_task(date_from: str, date_to: str, media_types: list[str],
                progress_key: str, fetch_comments: bool = False,
-               comments_limit: int = 25):
+               comments_limit: int = 25, auto_post: bool = False):
     session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     def update_prog(**kw):
@@ -306,7 +306,7 @@ def scrap_task(date_from: str, date_to: str, media_types: list[str],
         total_media = sum(len(p.get("_media_files", [])) for p in posts)
 
         wp_results = []
-        if WP_ENABLED and WP_URL and WP_USER and WP_APP_PASS:
+        if auto_post and WP_ENABLED and WP_URL and WP_USER and WP_APP_PASS:
             try:
                 from wordpress import WordPressClient
                 wp = WordPressClient()
@@ -374,6 +374,7 @@ def start_scrap():
     date_to = data.get("date_to", "")
     media_types = data.get("media_types", [])
     fetch_comments = data.get("fetch_comments", False)
+    auto_post = data.get("auto_post", False)
 
     if not ACCESS_TOKEN or not IG_USER_ID:
         return jsonify({"error": "ACCESS_TOKEN atau IG_USER_ID belum diisi di .env"}), 400
@@ -385,7 +386,7 @@ def start_scrap():
     thread = threading.Thread(
         target=scrap_task,
         args=(date_from, date_to, media_types, progress_key),
-        kwargs={"fetch_comments": fetch_comments, "comments_limit": COMMENTS_LIMIT},
+        kwargs={"fetch_comments": fetch_comments, "comments_limit": COMMENTS_LIMIT, "auto_post": auto_post},
         daemon=True
     )
     thread.start()
