@@ -31,6 +31,8 @@ class WordPressClient:
         self.session.auth = (self.username, self.app_password)
         self.session.headers.update({"Accept": "application/json"})
 
+        self._ext_session = requests.Session()
+
         self._api_base = f"{self.wp_url}/wp-json/wp/v2"
         self._template_cache: dict | None = None
 
@@ -309,15 +311,19 @@ class WordPressClient:
             for item in wp_media_items
         ]
 
+        gallery_injected = False
+
         gallery_widgets = self._find_widgets(cloned, "bdt-advanced-image-gallery")
         if gallery_widgets and gallery_images:
             gallery_widgets[0]["settings"]["wp_gallery"] = gallery_images
             gallery_widgets[0]["settings"]["_skin"] = "bdt-carousel"
+            gallery_injected = True
             logger.info(f"Injected {len(gallery_images)} images into bdt-advanced-image-gallery (carousel)")
 
         image_gallery_widgets = self._find_widgets(cloned, "image-gallery")
         if image_gallery_widgets and gallery_images:
             image_gallery_widgets[0]["settings"]["wp_gallery"] = gallery_images
+            gallery_injected = True
             logger.info(f"Injected {len(gallery_images)} images into image-gallery (grid)")
 
         text_widgets = self._find_widgets(cloned, "text-editor")
@@ -337,10 +343,27 @@ class WordPressClient:
 
         if content_widget:
             editor_html = self._build_elementor_editor_content(post, wp_media_items)
+
+            if not gallery_injected:
+                image_tags: list[str] = []
+                for item in wp_media_items:
+                    if item.get("type") != "VIDEO":
+                        src = item.get("source_url", "")
+                        image_tags.append(f'<img src="{src}" style="max-width:100%;height:auto;display:block;margin-bottom:10px" />')
+                if image_tags:
+                    editor_html = "\n".join(image_tags) + "\n" + editor_html
+                    logger.info(f"Fallback: injected {len(image_tags)} images into text-editor")
+
             content_widget["settings"]["editor"] = editor_html
             logger.info(f"Injected content into text-editor widget ({len(editor_html)} chars)")
         else:
             logger.warning("Tidak ada text-editor widget yang cocok untuk inject konten")
+
+        if not gallery_injected and not content_widget and wp_media_items:
+            raise Exception(
+                "Template tidak memiliki widget gallery (bdt-advanced-image-gallery / image-gallery) "
+                "maupun text-editor untuk menampung konten media."
+            )
 
         fi_widgets = self._find_widgets(cloned, "theme-post-featured-image")
         if fi_widgets:
@@ -366,21 +389,36 @@ class WordPressClient:
     def post_ig_post(self, post: dict, status: str = "") -> dict:
         result = {
             "ig_post_id": post.get("id"),
+            "media_type": post.get("media_type", ""),
+            "title": "",
             "success": False,
             "wp_post_id": None,
             "wp_edit_url": None,
             "error": None,
+            "logs": [],
         }
+
+        def _add_log(step: str, message: str, **extra):
+            entry = {"step": step, "message": message}
+            entry.update(extra)
+            result["logs"].append(entry)
 
         try:
             media_files = self._get_media_files_for_post(post)
+
+            _add_log(
+                "media_files",
+                f"{len(media_files)} file ditemukan",
+                count=len(media_files),
+            )
 
             wp_media_items: list[dict] = []
             featured_media_id = None
 
             for file_path, media_type in media_files:
-                title = f"IG {post.get('id', '')} - {file_path.split('/')[-1]}"
-                upload_result = self.upload_media(file_path, title=title)
+                filename = file_path.split("/")[-1]
+                upload_title = f"IG {post.get('id', '')} - {filename}"
+                upload_result = self.upload_media(file_path, title=upload_title)
                 if upload_result:
                     media_id, source_url = upload_result
                     wp_media_items.append({
@@ -390,12 +428,28 @@ class WordPressClient:
                     })
                     if featured_media_id is None:
                         featured_media_id = media_id
+                    _add_log(
+                        "upload",
+                        f"{filename} diupload",
+                        file=filename,
+                        wp_media_id=media_id,
+                        type=media_type,
+                        status="ok",
+                    )
+                else:
+                    _add_log(
+                        "upload",
+                        f"Gagal upload {filename}",
+                        file=filename,
+                        type=media_type,
+                        status="failed",
+                    )
 
             if post.get("media_type") == "VIDEO":
                 thumbnail_url = post.get("thumbnail_url", "")
                 if thumbnail_url:
                     try:
-                        resp = self.session.get(thumbnail_url, timeout=30)
+                        resp = self._ext_session.get(thumbnail_url, timeout=30)
                         resp.raise_for_status()
                         with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as f:
                             f.write(resp.content)
@@ -408,13 +462,39 @@ class WordPressClient:
                         if thumb_result:
                             thumb_id, thumb_url = thumb_result
                             featured_media_id = thumb_id
+                            _add_log(
+                                "thumbnail",
+                                "Thumbnail diupload sebagai featured image",
+                                wp_media_id=thumb_id,
+                                status="ok",
+                                set_as_featured=True,
+                            )
                             logger.info(f"Video thumbnail uploaded as featured image: #{thumb_id}")
+                        else:
+                            _add_log(
+                                "thumbnail",
+                                "Thumbnail gagal diupload ke WP",
+                                status="failed",
+                            )
                     except Exception as e:
+                        _add_log(
+                            "thumbnail",
+                            f"Gagal download thumbnail: {e}",
+                            status="failed",
+                            error=str(e)[:120],
+                        )
                         logger.warning(f"Gagal upload video thumbnail: {e}")
-                elif featured_media_id:
-                    featured_media_id = None
+                else:
+                    if featured_media_id:
+                        featured_media_id = None
+                    _add_log(
+                        "thumbnail",
+                        "Tidak ada thumbnail_url di data IG",
+                        status="skipped",
+                    )
 
             title = self._build_title(post)
+            result["title"] = title
             post_status = status or WP_POST_STATUS
 
             use_elementor = bool(WP_TEMPLATE_POST_ID)
@@ -440,9 +520,23 @@ class WordPressClient:
                             "_elementor_page_settings": template.get("page_settings", ""),
                         },
                     )
+
+                    _add_log(
+                        "post_created",
+                        f"Draft post #{wp_post.get('id')} dibuat (Elementor)",
+                        wp_post_id=wp_post.get("id"),
+                        mode="elementor",
+                        featured_media=featured_media_id,
+                    )
+
                 except Exception as e:
                     logger.warning(f"Elementor template gagal, fallback ke HTML: {e}")
                     use_elementor = False
+                    _add_log(
+                        "fallback_html",
+                        f"Elementor gagal, fallback ke HTML: {e}",
+                        reason=str(e)[:120],
+                    )
                     result["error"] = (
                         f"Template Elementor gagal: {e}. "
                         "Post dibuat sebagai HTML tanpa template."
@@ -472,6 +566,14 @@ class WordPressClient:
                     },
                 )
 
+                _add_log(
+                    "post_created",
+                    f"Draft post #{wp_post.get('id')} dibuat (HTML)",
+                    wp_post_id=wp_post.get("id"),
+                    mode="html",
+                    featured_media=featured_media_id,
+                )
+
             result["success"] = True
             result["wp_post_id"] = wp_post.get("id")
             result["wp_edit_url"] = (
@@ -480,6 +582,7 @@ class WordPressClient:
 
         except Exception as e:
             result["error"] = str(e)
+            _add_log("error", str(e), detail=str(e)[:200])
             logger.error(f"Gagal post IG {post.get('id')}: {e}")
 
         return result

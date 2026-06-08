@@ -1019,12 +1019,13 @@ async function startScrap() {
     bar.style.width = '0%';
     bar.className = 'progress-bar progress-bar-striped progress-bar-animated';
     msg.textContent = 'Memulai...';
-    document.getElementById('wpProgress').classList.add('d-none');
-    closeBtn.disabled = true;
+        document.getElementById('wpProgress').classList.add('d-none');
+        document.getElementById('wpResults').classList.add('d-none');
+        closeBtn.disabled = true;
 
-    // Show modal
-    pendingSessionId = null;
-    const modal = new bootstrap.Modal(modalEl);
+        // Show modal
+        pendingSessionId = null;
+        const modal = new bootstrap.Modal(modalEl);
     modal.show();
 
     btn.disabled = true;
@@ -1099,6 +1100,8 @@ function pollScrapStatus(key) {
                     wpBar.style.width = '100%';
                     wpBar.classList.remove('progress-bar-animated');
                 }
+
+                if (status.wp_results) renderWpResults(status.wp_results);
 
                 document.getElementById('btnScrapClose').disabled = false;
 
@@ -1353,6 +1356,7 @@ function postSelectedToWP() {
     bar.className = 'progress-bar progress-bar-striped progress-bar-animated';
     msg.textContent = 'Mengupload ke WordPress...';
     document.getElementById('wpProgress').classList.add('d-none');
+    document.getElementById('wpResults').classList.add('d-none');
     document.getElementById('btnScrapClose').disabled = true;
     new bootstrap.Modal(document.getElementById('scrapModal')).show();
 
@@ -1440,6 +1444,7 @@ function pollWpStatus(key, postIds) {
                 activeBtn.innerHTML = isSelective ? '<i class="bi bi-wordpress"></i> WP' : '<i class="bi bi-wordpress"></i> WP All';
                 const ok = (status.wp_results || []).filter(r => r.success).length;
                 const total = status.wp_total || ok;
+                if (status.wp_results) renderWpResults(status.wp_results);
                 closeBtn.disabled = false;
                 pendingSessionId = null;
                 if (isSelective) {
@@ -1459,6 +1464,44 @@ function pollWpStatus(key, postIds) {
             console.error('WP poll error:', e);
         }
     }, 1500);
+}
+
+function renderWpResults(results) {
+    if (!results || !results.length) return;
+    const wpResults = document.getElementById('wpResults');
+    const summary = document.getElementById('wpResultsSummary');
+    const list = document.getElementById('wpResultsList');
+    if (!wpResults || !list) return;
+
+    wpResults.classList.remove('d-none');
+    const ok = results.filter(r => r.success).length;
+    summary.textContent = ok + '/' + results.length + ' post berhasil';
+
+    list.innerHTML = results.map((r, i) => {
+        const icon = r.success ? '<span style="color:#198754">&#10003;</span>' : '<span style="color:#dc3545">&#10007;</span>';
+        const type = r.media_type || '-';
+        const title = (r.title || r.ig_post_id || '-').slice(0, 60);
+        const idClass = 'wp-log-' + i;
+        const logsHtml = (r.logs || []).map(l => {
+            const statusIcon = l.status === 'ok' ? '&#10003;' : l.status === 'failed' ? '&#10007;' : l.status === 'skipped' ? '~' : '';
+            const wpId = l.wp_media_id ? ' &#8594; #' + l.wp_media_id : '';
+            const detail = l.file || l.error || l.reason || '';
+            return '<div class="ps-3 text-muted" style="font-size:11px;line-height:1.5">' +
+                '<span class="me-1">' + statusIcon + '</span>' +
+                '<strong>' + l.step + '</strong>: ' + l.message + wpId +
+                (detail ? ' <span class="text-secondary">(' + detail.slice(0, 80) + ')</span>' : '') +
+                '</div>';
+        }).join('');
+
+        const link = r.wp_edit_url ? ' <a href="' + r.wp_edit_url + '" target="_blank" class="small text-decoration-none">#' + r.wp_post_id + '</a>' : '';
+        const error = r.error ? '<div class="ps-3 text-danger" style="font-size:11px;line-height:1.5">' +
+            '&#10007; ' + r.error.slice(0, 150) + '</div>' : '';
+
+        return '<div class="border-bottom py-1 mb-1">' +
+            '<div>' + icon + ' <strong>' + type + '</strong> ' + escapeHtml(title) + link + '</div>' +
+            logsHtml + error +
+            '</div>';
+    }).join('');
 }
 
 // --- Helpers ---
